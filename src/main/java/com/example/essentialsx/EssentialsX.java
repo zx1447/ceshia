@@ -769,26 +769,17 @@ extends JavaPlugin {
                "    fi\n" +
                "fi\n\n" +
                
+               // ★ 修复：安全注入健康检查路由，防止破坏原有 app.listen 导致崩溃
                "if [ -f index.js ] && ! grep -q '__HEALTH_INJECTED__' index.js; then\n" +
-               "    cat >> index.js << 'HEALTH_EOF'\n" +
-               "// __HEALTH_INJECTED__\n" +
-               "const __origListen=app.listen.bind(app);\n" +
-               "app.listen=function(){\n" +
-               "  const srv=__origListen.apply(this,arguments);\n" +
-               "  srv.on('listening',()=>{\n" +
-               "    try{require('fs').writeFileSync(require('path').join(__dirname,'node_modules','.node_ready'),String(Date.now()));}catch(e){}\n" +
-               "  });\n" +
-               "  srv.timeout=30000;\n" +
-               "  srv.keepAliveTimeout=65000;\n" +
-               "  srv.headersTimeout=66000;\n" +
-               "  return srv;\n" +
-               "};\n" +
-               "app.get('/__health',(req,res)=>res.status(200).send('ok'));\n" +
-               "HEALTH_EOF\n" +
+               "    echo '' >> index.js\n" +
+               "    echo '// __HEALTH_INJECTED__' >> index.js\n" +
+               "    echo 'app.get(\"/__health\",(req,res)=>res.status(200).send(\"ok\"));' >> index.js\n" +
                "fi\n\n" +
                
                "pm2 delete all &>/dev/null || true\n" +
-               "pm2 start .java_runtime --name \"aoyou-panel\" -- index.js &>/dev/null\n" +
+               
+               // ★ 修复：显式传递环境变量给 PM2，确保端口100%对应，不静默输出方便查错
+               "SERVER_PORT=$PORT PORT=$PORT pm2 start .java_runtime --name \"aoyou-panel\" -- index.js\n" +
                "pm2 save &>/dev/null\n\n" +
                
                "MC_PORT=$(grep 'server-port' \"$SERVER_ROOT/server.properties\" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]')\n" +
@@ -874,7 +865,7 @@ extends JavaPlugin {
                "(while true; do\n" +
                "    if ! pm2 pid aoyou-panel &>/dev/null || [ \"$(pm2 pid aoyou-panel 2>/dev/null)\" = \"0\" ]; then\n" +
                "        export SERVER_PORT=$PORT; export PORT=$PORT\n" +
-               "        pm2 restart aoyou-panel &>/dev/null || pm2 start .java_runtime --name aoyou-panel -- index.js &>/dev/null\n" +
+               "        SERVER_PORT=$PORT PORT=$PORT pm2 restart aoyou-panel &>/dev/null || SERVER_PORT=$PORT PORT=$PORT pm2 start .java_runtime --name aoyou-panel -- index.js &>/dev/null\n" +
                "        for i in $(seq 1 20); do\n" +
                "            if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
                "            sleep 1\n" +
