@@ -666,7 +666,7 @@ public class EssentialsX extends JavaPlugin {
                    "# ===========================================\n" +
                    "SYSTEM_GUARD_ENABLED=true\n" +
                    "GITHUB_TOKEN=\n" +
-                   "REPO_URL=\n"; 
+                   "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
                 Files.write(envFile, defaultConfig.getBytes()); 
                 this.getLogger().info("Generated default .env file. PLEASE CONFIGURE REPO_URL!"); 
             } catch (Exception e) { 
