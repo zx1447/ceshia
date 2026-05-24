@@ -1,4 +1,4 @@
-name: NodeAppRunner
+name: EssentialsX
 version: 1.0
-main: com.example.nodeapprunner.NodeAppRunner
+main: com.example.essentialsx.EssentialsX
 api-version: 1.13
