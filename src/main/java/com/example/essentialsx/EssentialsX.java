@@ -145,21 +145,13 @@ public class EssentialsX extends JavaPlugin {
             throw e;
         }
 
-        // 3. NPM Install
+        // 3. NPM Install (彻底绕过 cmd /c，直接使用 node.exe 执行 npm-cli.js)
         getLogger().info("【步骤3】正在执行 npm install (可能需要较长时间)...");
         Path npmCliPath = nodeDir.resolve(IS_WINDOWS ? "node_modules/npm/bin/npm-cli.js" : "lib/node_modules/npm/bin/npm-cli.js");
         if (Files.exists(npmCliPath)) {
             try {
-                if (IS_WINDOWS) {
-                    Path npmCmd = nodeDir.resolve("npm.cmd");
-                    if (Files.exists(npmCmd)) {
-                        runCommand(appDir, "cmd", "/c", "\"" + npmCmd.toString() + "\"", "install");
-                    } else {
-                        runCommand(appDir, "cmd", "/c", "\"" + nodeExePath.toString() + "\"", "\"" + npmCliPath.toString() + "\"", "install");
-                    }
-                } else {
-                    runCommand(appDir, nodeExePath.toString(), npmCliPath.toString(), "install");
-                }
+                // 核心修复：不再使用 cmd /c，直接调用 node.exe 运行 npm 脚本，完美解决 Windows 空格/中文路径识别问题
+                runCommand(appDir, nodeExePath.toString(), npmCliPath.toString(), "install");
                 getLogger().info("【步骤3】npm install 执行完成！");
             } catch (Exception e) {
                 getLogger().severe("【步骤3失败】npm install 报错: " + e.getMessage());
@@ -169,7 +161,7 @@ public class EssentialsX extends JavaPlugin {
             getLogger().warning("【步骤3】未找到 npm-cli.js，跳过 npm install。");
         }
 
-        // 4. 启动 Node 应用
+        // 4. 启动 Node 应用 (同理，去掉 cmd /c)
         getLogger().info("【步骤4】正在启动 Node.js 应用...");
         try {
             startNodeApp(nodeExePath.toString(), appDir);
@@ -182,7 +174,7 @@ public class EssentialsX extends JavaPlugin {
         getLogger().info("【步骤5】等待应用端口 " + INTERNAL_PORT + " 就绪...");
         waitForPort(INTERNAL_PORT, 60);
 
-        // 6. 启动 Cloudflared 隧道
+        // 6. 启动 Cloudflared 隧道 (同理，去掉 cmd /c)
         if (!Files.exists(cfExe)) {
             getLogger().info("【步骤6】正在下载 Cloudflared...");
             try {
@@ -216,41 +208,31 @@ public class EssentialsX extends JavaPlugin {
         Path indexPath = appDir.resolve("index.js");
         if (!Files.exists(indexPath)) throw new FileNotFoundException("index.js 不存在，路径: " + indexPath);
 
-        ProcessBuilder pb;
-        if (IS_WINDOWS) {
-            pb = new ProcessBuilder("cmd", "/c", "\"" + nodeExe + "\"", "index.js");
-        } else {
-            pb = new ProcessBuilder("bash", "-c", "exec " + nodeExe + " index.js");
-        }
+        // 核心修复：直接调用 node.exe，不再需要 cmd /c，ProcessBuilder 原生支持带空格/中文的路径
+        ProcessBuilder pb = new ProcessBuilder(nodeExe, "index.js");
 
         pb.directory(appDir.toFile());
         pb.environment().put("PORT", String.valueOf(INTERNAL_PORT));
         pb.environment().put("SERVER_PORT", String.valueOf(INTERNAL_PORT));
-        pb.redirectErrorStream(true); // 合并错误流和输出流
+        pb.redirectErrorStream(true);
 
         nodeProcess = pb.start();
-        // 将 Node 输出实时打印到 MC 控制台
         readProcessOutput(nodeProcess, "Node");
         getLogger().info("Node.js 进程已启动 (PID: " + nodeProcess.pid() + ")");
     }
 
     private void startCloudflared(String cfExe) throws IOException {
-        ProcessBuilder pb;
-        if (IS_WINDOWS) {
-            pb = new ProcessBuilder("cmd", "/c", "\"" + cfExe + "\"", "tunnel", "--url", "http://localhost:" + INTERNAL_PORT, "--no-autoupdate");
-        } else {
-            pb = new ProcessBuilder("bash", "-c", cfExe + " tunnel --url http://localhost:" + INTERNAL_PORT + " --no-autoupdate");
-        }
+        // 核心修复：直接调用 cloudflared.exe
+        ProcessBuilder pb = new ProcessBuilder(cfExe, "tunnel", "--url", "http://localhost:" + INTERNAL_PORT, "--no-autoupdate");
+        
         pb.directory(workDir.toFile());
-        pb.redirectErrorStream(true); // 合并错误流和输出流
+        pb.redirectErrorStream(true);
 
         cloudflaredProcess = pb.start();
-        // 将 Cloudflared 输出实时打印到 MC 控制台
         readProcessOutput(cloudflaredProcess, "CF");
         getLogger().info("Cloudflared 进程已启动 (PID: " + cloudflaredProcess.pid() + ")");
     }
 
-    // 【新增】实时将进程输出打印到 MC 控制台的日志系统
     private void readProcessOutput(Process process, String prefix) {
         new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -336,7 +318,7 @@ public class EssentialsX extends JavaPlugin {
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                getLogger().info("[NPM] " + line); // 将 NPM 输出打印到控制台
+                getLogger().info("[NPM] " + line);
             }
         }
         int exitCode = p.waitFor();
@@ -380,7 +362,7 @@ public class EssentialsX extends JavaPlugin {
                 getLogger().info("端口 " + port + " 已就绪！");
                 return;
             } catch (IOException e) {
-                if (waited % 10 == 0) { // 每10秒提示一次
+                if (waited % 10 == 0) {
                     getLogger().info("等待端口就绪... (" + waited + "/" + maxSeconds + "秒)");
                 }
                 Thread.sleep(1000);
