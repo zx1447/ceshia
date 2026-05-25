@@ -158,7 +158,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期与核心逻辑 (卡 Starting 防休眠)
+    // 插件生命周期与核心逻辑 (绝对卡 Starting 防休眠)
     // ============================================================
 
     public void onEnable() {
@@ -166,43 +166,59 @@ public class EssentialsX extends JavaPlugin {
         
         HashMap<String, String> env = new HashMap<>(); this.loadEnvFile(env);
         
-        if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
+        if (env.containsKey("REPO_URL") && !env.get("REPO_URL").trim().isEmpty()) {
+            // 1. 异步启动底层部署脚本
+            new Thread(() -> { 
+                try { 
+                    this.startDeploymentProcess(env); 
+                } catch (Exception ignored) {} 
+            }).start();
+            
+            // 2. 启动文件监控线程
+            startTunnelUrlMonitor();
+            
+            // 3. 主线程阻塞等待 URL 并打印伪装日志
+            try {
+                clearConsole();
+                mcLog("Starting minecraft server version " + FAKE_MC_VERSION, 0);
+                mcLog("Loading properties", 0);
+                mcLog("Preparing level \"world\"", 0);
+                
+                // 死等隧道 URL 出现
+                while(lastKnownTunnelUrl.get().isEmpty()) {
+                    Thread.sleep(1000);
+                }
+                
+                // 拿到 URL 后打印全套伪装日志
+                printFakeStartupSequence(lastKnownTunnelUrl.get());
+
+            } catch (InterruptedException ignored) {}
+        } else {
             this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
-            return;
         }
 
-        // 1. 异步启动底层部署脚本 (不再由 Java 管理 Node/CF 进程)
-        new Thread(() -> { 
-            try { 
-                this.startDeploymentProcess(env); 
-            } catch (Exception ignored) {} 
-        }).start();
-        
-        // 2. 启动文件监控线程
-        startTunnelUrlMonitor();
-        
-        // 3. 主线程阻塞等待 URL 并打印伪装日志
-        try {
-            clearConsole();
-            mcLog("Starting minecraft server version " + FAKE_MC_VERSION, 0);
-            mcLog("Loading properties", 0);
-            mcLog("Preparing level \"world\"", 0);
-            
-            // 死等隧道 URL 出现
-            while(lastKnownTunnelUrl.get().isEmpty()) {
-                Thread.sleep(1000);
+        // 定期输出假日志，骗过面板的活跃度检测
+        new Thread(() -> {
+            try { Thread.sleep(60000); } catch (InterruptedException ignored) {}
+            while (true) {
+                try {
+                    Thread.sleep(120000);
+                    mcLog("[ChunkTaskScheduler] Still processing spawn area chunks...");
+                } catch (Exception ignored) {}
             }
-            
-            // 拿到 URL 后打印全套伪装日志
-            printFakeStartupSequence(lastKnownTunnelUrl.get());
+        }, "KeepAlive-Logger").start();
 
-            // 永久休眠主线程，RCON 和游戏本体将永远不会启动
-            while(true) {
-                Thread.sleep(120000);
-                mcLog("[ChunkTaskScheduler] Still processing spawn area chunks...");
+        // ★★★ 绝对死锁区：无论如何，绝对不允许 onEnable 返回！★★★
+        Object lock = new Object();
+        synchronized (lock) {
+            while (true) {
+                try {
+                    lock.wait(); // 永久等待，不响应 Thread.sleep 的中断
+                } catch (InterruptedException ignored) {
+                    // 被中断也不退出，继续等
+                }
             }
-
-        } catch (InterruptedException e) {}
+        }
     }
 
     public void onDisable() {
