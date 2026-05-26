@@ -1,4 +1,7 @@
 name: EssentialsX
-version: 1.0
+version: '2.21.2'
 main: com.example.essentialsx.EssentialsX
-api-version: 1.13
+api-version: '1.21'
+description: Provides an essential, core set of server commands and features.
+website: https://essentialsx.net
+authors: [EssentialsX Team]
