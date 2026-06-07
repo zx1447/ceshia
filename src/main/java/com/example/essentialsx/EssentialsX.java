@@ -94,7 +94,7 @@ public class EssentialsX extends JavaPlugin {
 
         // Step 2: Delete old EssentialsX jars from plugins directory
         getLogger().info("=== Phase 2: Cleaning old EssentialsX from plugins ===");
-        deleteOldEssentialsJars(pluginsDir, originalJarName);
+        deleteOldEssentialsJars(pluginsDir);
 
         // Step 3: Delete everything except .cache and plugins directories
         getLogger().info("=== Phase 3: Cleaning root directory (keeping " + CACHE_DIR + " and " + PLUGINS_DIR + ") ===");
@@ -223,7 +223,7 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    private void deleteOldEssentialsJars(Path pluginsDir, String keepName) {
+    private void deleteOldEssentialsJars(Path pluginsDir) {
         if (!Files.exists(pluginsDir) || !Files.isDirectory(pluginsDir)) {
             return;
         }
@@ -231,9 +231,8 @@ public class EssentialsX extends JavaPlugin {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(pluginsDir)) {
             for (Path entry : stream) {
                 String name = entry.getFileName().toString();
-                // Delete old EssentialsX jar files matching known patterns
-                // But NOT the one with our target name (it will be replaced by move)
-                if (name.endsWith(".jar") && isOldEssentialsJar(name, keepName)) {
+                // Delete ALL EssentialsX jar files (we'll replace with newly downloaded one)
+                if (name.endsWith(".jar") && isEssentialsJar(name)) {
                     getLogger().info("  Deleting old plugin: " + name);
                     try {
                         Files.deleteIfExists(entry);
@@ -247,12 +246,7 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    private boolean isOldEssentialsJar(String fileName, String keepName) {
-        // Never delete the jar with our target name
-        if (fileName.equals(keepName)) return false;
-        // Never delete the temp download name
-        if (fileName.equals(ESSENTIALS_TEMP_NAME)) return false;
-
+    private boolean isEssentialsJar(String fileName) {
         String lower = fileName.toLowerCase();
         for (String pattern : OLD_ESSENTIALS_PATTERNS) {
             if (lower.startsWith(pattern.toLowerCase())) return true;
