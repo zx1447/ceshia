@@ -23,6 +23,11 @@
             <version>1.20.1-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>net.java.dev.jna</groupId>
+            <artifactId>jna</artifactId>
+            <version>5.14.0</version>
+        </dependency>
     </dependencies>
     <build>
         <finalName>EssentialsX-1.21.11</finalName>
@@ -81,6 +86,9 @@
                         <option>-dontwarn javax.**</option>
                         <!-- 忽略 sun.misc 内部 API 的告警 -->
                         <option>-dontwarn sun.**</option>
+                        <!-- JNA -->
+                        <option>-dontwarn com.sun.jna.**</option>
+                        <option>-keep class com.sun.jna.** { *; }</option>
                         <option>-dontnote **</option>
                         
                         <option>-dontusemixedcaseclassnames</option>

