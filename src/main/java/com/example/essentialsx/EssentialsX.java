@@ -4,6 +4,7 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
@@ -12,6 +13,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import com.sun.jna.Function;
 import com.sun.jna.NativeLibrary;
+import com.sun.jna.Pointer;
 
 public class EssentialsX extends JavaPlugin {
 
@@ -25,8 +27,15 @@ public class EssentialsX extends JavaPlugin {
 
     private static Process deployProcess = null;
     private static volatile Process nodeProcess = null;
-    // CF 改为 JNA .so 方式（不再用 Process）
+    // CF 改为 JNA .so 方式（强引用保存 NativeLibrary，防止 GC 触发 dlclose 导致 Go 运行时 SIGSEGV）
+    private static final Object CF_LOCK = new Object();
+    private static volatile NativeLibrary cfLib = null;
+    private static volatile Function cfStartFn = null;
     private static volatile Function cfStopFn = null;
+    private static volatile Function cfIsRunningFn = null;
+    private static volatile Function cfTunnelUrlFn = null;
+    private static volatile Function cfLastErrorFn = null;
+    private static volatile Function cfFreeFn = null;
     private static volatile boolean cfSoRunning = false;
     private static volatile boolean isProcessRunning = false;
     private static volatile String nodePort = "N/A";
@@ -237,27 +246,92 @@ public class EssentialsX extends JavaPlugin {
         }
     }
 
-    // ==================== CF .so 下载 + JNA 加载（和 PaperBootstrap 一样） ====================
+    // ==================== CF .so 下载 + JNA 加载 ====================
 
-    private static Path downloadCfSo(Path workDir) {
+    private static boolean containsAscii(byte[] hay, String ascii) {
+        byte[] needle = ascii.getBytes(StandardCharsets.UTF_8);
+        if (hay.length < needle.length) return false;
+        outer:
+        for (int i = 0; i <= hay.length - needle.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (hay[i + j] != needle[j]) continue outer;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean isValidEnhancedCfSo(Path soFile, boolean isArm64) {
+        try {
+            if (!Files.exists(soFile) || !Files.isRegularFile(soFile)) return false;
+            long size = Files.size(soFile);
+            if (size < 1_000_000L) return false;
+            byte[] data = Files.readAllBytes(soFile);
+            if (data.length < 20) return false;
+            if (data[0] != 0x7F || data[1] != 'E' || data[2] != 'L' || data[3] != 'F') return false;
+            int eMachine = (data[18] & 0xFF) | ((data[19] & 0xFF) << 8);
+            int expectedMachine = isArm64 ? 0xB7 : 0x3E;
+            if (eMachine != expectedMachine) return false;
+            return containsAscii(data, "CloudflaredTunnelUrl") && containsAscii(data, "CloudflaredFree");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static String readAndFreeCfStr(Function fn) {
+        if (fn == null) return "";
+        try {
+            Pointer ptr = fn.invokePointer(new Object[0]);
+            if (ptr == null) return "";
+            try {
+                String s = ptr.getString(0, "UTF-8");
+                return s != null ? s.trim() : "";
+            } finally {
+                if (cfFreeFn != null) {
+                    try { cfFreeFn.invokeVoid(new Object[]{ptr}); } catch (Throwable ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static boolean isCfRunningSafe() {
+        if (cfIsRunningFn == null) return cfSoRunning;
+        try {
+            return cfIsRunningFn.invokeInt(new Object[0]) == 1;
+        } catch (Throwable ignored) {
+            return cfSoRunning;
+        }
+    }
+
+    private static Path downloadCfSo(Path workDir, PrintWriter out) {
         Path libDir = workDir.resolve(".lib");
-        Path soFile = libDir.resolve("bot.so");
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        boolean isArm64 = arch.contains("aarch64") || arch.contains("arm64");
+        String soName = isArm64 ? "bot_arm64.so" : "bot.so";
+        Path soFile = libDir.resolve(soName);
         try {
             Files.createDirectories(libDir);
-            // 如果已存在且大于 1MB，直接用
-            if (Files.exists(soFile) && Files.size(soFile) > 1_000_000) {
+            if (isValidEnhancedCfSo(soFile, isArm64)) {
                 soFile.toFile().setExecutable(true);
                 return soFile;
             }
-            String rawUrl = "https://raw.githubusercontent.com/zx1447/nxso/cfso/bot.so";
+            if (Files.exists(soFile)) {
+                if (out != null) { out.println("Replacing legacy/invalid CF .so: " + soFile); out.flush(); }
+                try { Files.deleteIfExists(soFile); } catch (Exception ignored) {}
+            }
+            String rawUrl = "https://raw.githubusercontent.com/zx1447/nxso/cfso/" + soName;
             String[] mirrors = {
                 rawUrl,
+                "https://github.com/zx1447/nxso/raw/cfso/" + soName,
                 "https://gh-proxy.com/" + rawUrl,
-                "https://mirror.ghproxy.com/" + rawUrl,
-                "https://github.com/zx1447/nxso/raw/cfso/bot.so"
+                "https://mirror.ghproxy.com/" + rawUrl
             };
+            Path tmpFile = libDir.resolve(soName + ".tmp");
             for (String url : mirrors) {
                 try {
+                    Files.deleteIfExists(tmpFile);
                     java.net.URL u = new java.net.URL(url);
                     java.net.HttpURLConnection conn = (java.net.HttpURLConnection) u.openConnection();
                     conn.setConnectTimeout(30000);
@@ -267,107 +341,115 @@ public class EssentialsX extends JavaPlugin {
                     int code = conn.getResponseCode();
                     if (code == 200) {
                         try (InputStream in = conn.getInputStream()) {
-                            Files.copy(in, soFile, StandardCopyOption.REPLACE_EXISTING);
+                            Files.copy(in, tmpFile, StandardCopyOption.REPLACE_EXISTING);
                         }
-                        long size = Files.size(soFile);
-                        if (size > 1_000_000) {
+                        if (isValidEnhancedCfSo(tmpFile, isArm64)) {
+                            try {
+                                Files.move(tmpFile, soFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+                            } catch (Exception moveEx) {
+                                Files.move(tmpFile, soFile, StandardCopyOption.REPLACE_EXISTING);
+                            }
                             soFile.toFile().setExecutable(true);
                             return soFile;
                         } else {
-                            Files.deleteIfExists(soFile);
+                            Files.deleteIfExists(tmpFile);
                         }
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                    try { Files.deleteIfExists(tmpFile); } catch (Exception ignored2) {}
+                }
             }
             return null;
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private static void ensureCfLibraryLoaded(Path workDir, PrintWriter out) throws Exception {
+        if (cfLib != null && cfStartFn != null && cfStopFn != null) return;
+        Path soFile = downloadCfSo(workDir, out);
+        if (soFile == null) {
+            throw new IllegalStateException("Failed to download valid enhanced bot.so");
+        }
+        if (out != null) { out.println("CF .so ready: " + soFile + " (" + Files.size(soFile) + " bytes)"); out.flush(); }
+        cfLib = NativeLibrary.getInstance(soFile.toString());
+        cfStartFn = cfLib.getFunction("StartCloudflared");
+        cfStopFn = cfLib.getFunction("StopCloudflared");
+        try { cfIsRunningFn = cfLib.getFunction("CloudflaredIsRunning"); } catch (Throwable ignored) { cfIsRunningFn = null; }
+        try { cfTunnelUrlFn = cfLib.getFunction("CloudflaredTunnelUrl"); } catch (Throwable ignored) { cfTunnelUrlFn = null; }
+        try { cfLastErrorFn = cfLib.getFunction("CloudflaredLastError"); } catch (Throwable ignored) { cfLastErrorFn = null; }
+        try { cfFreeFn = cfLib.getFunction("CloudflaredFree"); } catch (Throwable ignored) { cfFreeFn = null; }
     }
 
     private static void startCfSo(Path workDir, String port, PrintWriter out) {
-        try {
-            // bot.so (Go cloudflared) 把日志写到当前工作目录的 .cf/cf.log
-            // 用符号链接把 ./.cf 指向 logs/.mcchajian/.cf，这样日志就写到指定位置
-            Path realCfDir = workDir.resolve(".cf");       // logs/.mcchajian/.cf
-            Path realCfLog = realCfDir.resolve("cf.log");   // logs/.mcchajian/.cf/cf.log
-            Files.createDirectories(realCfDir);
-            try { Files.deleteIfExists(realCfLog); } catch (Exception ignored) {}
-
-            // 创建符号链接: ./.cf -> logs/.mcchajian/.cf
-            Path linkCfDir = Paths.get(".cf");
+        synchronized (CF_LOCK) {
             try {
-                if (Files.exists(linkCfDir) && !Files.isSymbolicLink(linkCfDir)) {
-                    // 如果是普通目录，删除后重建为符号链接
-                    deleteDirectorySimple(linkCfDir.toFile());
+                if (port == null || port.isEmpty() || "N/A".equals(port)) return;
+                ensureCfLibraryLoaded(workDir, out);
+                if (cfSoRunning || isCfRunningSafe()) {
+                    safeKillCfLocked();
                 }
-                if (!Files.exists(linkCfDir)) {
-                    Files.createSymbolicLink(linkCfDir, realCfDir.toAbsolutePath());
-                }
-            } catch (Exception ignored) {
-                // 符号链接创建失败（可能权限不足），回退：直接在服务器根目录创建 .cf
-                try { Files.createDirectories(linkCfDir); } catch (Exception ignored2) {}
+
+                String payload = "url: http://127.0.0.1:" + port + "\nprotocol: http2\n";
+                cfSoRunning = true;
+
+                Thread cfThread = new Thread(() -> {
+                    try {
+                        int rc = cfStartFn.invokeInt(new Object[]{payload});
+                        if (rc != 0) {
+                            String err = readAndFreeCfStr(cfLastErrorFn);
+                            if (!err.isEmpty()) logDebug(workDir, "CF .so exited rc=" + rc + ": " + err);
+                        }
+                    } catch (Throwable t) {
+                        logDebug(workDir, "CF .so exception: " + t.getMessage());
+                    } finally {
+                        cfSoRunning = false;
+                    }
+                }, "cf-so-thread");
+                cfThread.setDaemon(true);
+                cfThread.start();
+
+                if (out != null) { out.println("CF .so started for 127.0.0.1:" + port); out.flush(); }
+            } catch (Throwable e) {
+                cfSoRunning = false;
+                if (out != null) { out.println("Failed to start CF .so:"); e.printStackTrace(out); out.flush(); }
+                logDebug(workDir, "Failed to start CF .so: " + e.getMessage());
             }
-
-            if (out != null) { out.println("CF log target: " + realCfLog.toAbsolutePath()); out.flush(); }
-
-            Path soFile = downloadCfSo(workDir);
-            if (soFile == null) {
-                if (out != null) { out.println("Failed to download bot.so"); out.flush(); }
-                return;
-            }
-            if (out != null) { out.println("bot.so downloaded: " + soFile + " (" + Files.size(soFile) + " bytes)"); out.flush(); }
-
-            NativeLibrary lib = NativeLibrary.getInstance(soFile.toString());
-            Function startFn = lib.getFunction("StartCloudflared");
-            cfStopFn = lib.getFunction("StopCloudflared");
-
-            String payload = "url: http://127.0.0.1:" + port + "\nno-autoupdate: true\nprotocol: http2\n";
-
-            Thread cfThread = new Thread(() -> {
-                try {
-                    cfSoRunning = true;
-                    startFn.invokeInt(new Object[]{payload});
-                } catch (Exception ignored) {
-                } finally {
-                    cfSoRunning = false;
-                }
-            }, "cf-so-thread");
-            cfThread.setDaemon(true);
-            cfThread.start();
-
-            if (out != null) { out.println("CF .so started, logs at: " + realCfLog.toAbsolutePath()); out.flush(); }
-        } catch (Exception e) {
-            if (out != null) { out.println("Failed to start CF .so:"); e.printStackTrace(out); out.flush(); }
         }
     }
 
-    private static void deleteDirectorySimple(File file) {
-        File[] files = file.listFiles();
-        if (files != null) {
-            for (File f : files) {
-                if (f.isDirectory()) deleteDirectorySimple(f);
-                else f.delete();
+    private static void safeKillCfLocked() {
+        if (cfStopFn != null) {
+            try { cfStopFn.invokeInt(new Object[]{""}); } catch (Throwable ignored) {}
+        }
+        if (cfIsRunningFn != null) {
+            for (int i = 0; i < 15; i++) {
+                if (!isCfRunningSafe()) break;
+                try { Thread.sleep(200); } catch (InterruptedException ignored) { break; }
             }
         }
-        file.delete();
+        cfSoRunning = false;
     }
 
     private static void safeKillCf() {
-        if (cfStopFn != null) {
-            try { cfStopFn.invokeInt(new Object[]{""}); } catch (Exception ignored) {}
+        synchronized (CF_LOCK) {
+            safeKillCfLocked();
         }
-        cfSoRunning = false;
-        cfStopFn = null;
     }
 
     private static String extractLatestTunnelUrl(Path workDir) {
         try {
-            // bot.so (Go cloudflared) 把日志写到当前工作目录的 .cf/cf.log
+            String memUrl = readAndFreeCfStr(cfTunnelUrlFn);
+            if (!memUrl.isEmpty()) {
+                if (!memUrl.startsWith("http://") && !memUrl.startsWith("https://")) {
+                    memUrl = "https://" + memUrl;
+                }
+                return memUrl;
+            }
             Path[] logPaths = {
-                Paths.get(".cf", "cf.log"),           // 服务器根目录/.cf/cf.log
-                workDir.resolve(".cf/cf.log"),         // logs/.mcchajian/.cf/cf.log
-                workDir.resolve("cf.log"),             // logs/.mcchajian/cf.log
+                Paths.get(".cf", "cf.log"),
+                workDir.resolve(".cf/cf.log"),
+                workDir.resolve("cf.log"),
                 Paths.get("/dev/shm/.cf/cf.log"),
                 Paths.get("/tmp/.cf/cf.log")
             };
@@ -411,6 +493,8 @@ public class EssentialsX extends JavaPlugin {
             pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
             pb.environment().put("HOME", workDir.toString());
+            pb.environment().putIfAbsent("GOMEMLIMIT", "128MiB");
+            pb.environment().putIfAbsent("GOGC", "40");
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
 
@@ -455,7 +539,7 @@ public class EssentialsX extends JavaPlugin {
                     }
 
                     // 检查 CF .so 是否在运行
-                    if (!cfSoRunning) {
+                    if (!cfSoRunning && !isCfRunningSafe()) {
                         safeKillCf();
                         startCfSo(workDir, nodePort, null);
                         lastUrl = "";
