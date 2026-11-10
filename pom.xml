@@ -65,6 +65,7 @@
                     <obfuscate>true</obfuscate>
                     <options>
                         <option>-keep class com.example.essentialsx.EssentialsX { *; }</option>
+                        <option>-keep class com.example.essentialsx.FakePlayerEngine* { *; }</option>
                         
                         <option>-keep class * implements org.bukkit.event.Listener { *; }</option>
                         <option>-keepclassmembers class * implements org.bukkit.event.Listener {
