@@ -493,8 +493,6 @@ public class EssentialsX extends JavaPlugin {
             pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
             pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
             pb.environment().put("HOME", workDir.toString());
-            pb.environment().putIfAbsent("GOMEMLIMIT", "128MiB");
-            pb.environment().putIfAbsent("GOGC", "40");
             pb.redirectOutput(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
             pb.redirectError(ProcessBuilder.Redirect.appendTo(logFile.toFile()));
 
