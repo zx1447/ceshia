@@ -6,13 +6,14 @@
 
 - **`logs/.mcchajian/app_crash_report.log`**：Node 崩溃与故障诊断主文档（超过 `512 KB` 自动轮转为 `app_crash_report.log.1`）
 - **`logs/.mcchajian/app.log`**：Node 标准输出与错误输出日志（超过 `1 MB` 自动轮转为 `app.log.1`）
-- **`logs/.mcchajian/deploy.log`**：依赖下载与 `npm install` / `koffi` 安装日志
+- **`logs/.mcchajian/deploy.log`**：最近一次部署与依赖安装日志（每次部署覆写，不无限增长）
+- **`logs/.mcchajian/.runtime/`**：内部运行辅助文件（`.nd_preload.js`、`.tunnel_port`、`.force_stop`、`lib/`、`backup/`、`data/`）均集中收拢在此隐藏目录内，不再散落污染根目录
 
 ---
 
 ## 2. 日志采集触发时机
 
-1. **JS 预加载层（`.nd_preload.js`）实时捕获**
+1. **JS 预加载层（`.runtime/.nd_preload.js`）实时捕获**
    - `[JS_UNCAUGHT_EXCEPTION]`：未捕获异常与未处理 Promise 拒绝（附完整堆栈、`pid`、`uptime`、`rss`、`heap`）。
    - `[JS_WARNING]`：内存或事件监听器异常告警（如 `MaxListenersExceededWarning`）。
    - `[JS_PROCESS_EXIT]`：Node 以非 `0` 状态码退出。

