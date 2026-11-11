@@ -8,6 +8,7 @@ on:
       - 'src/**'
       - 'pom.xml'
       - 'plugin.yml'
+      - '.github/workflows/build-jar.yml'
   pull_request:
     branches:
       - main
@@ -44,27 +45,28 @@ jobs:
           echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
           echo "Found JAR file: $JAR_FILE"
           
-      - name: Create Latest Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: latest
-          name: Latest Build
-          body: |
-            ## Download
-            Download the JAR file below and place it in your server's `plugins` folder.
-            
-            ## Automatic Updates
-            This release is automatically updated on every push to the main branch.
-            The `latest` tag will always point to the most recent build.
-            
-          files: ${{ steps.jar-name.outputs.jar_file }}
-          make_latest: true
-          overwrite: true
-          draft: false
-          prerelease: false
+      - name: Publish latest release (gh CLI, hard failure on error)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          JAR="${{ steps.jar-name.outputs.jar_file }}"
+          echo "Publishing: $JAR ($(stat -c%s "$JAR") bytes)"
+          # always recreate the tag so it points at the commit we just built
+          gh release delete latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create latest "$JAR" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Latest Build" \
+            --notes "Download the JAR below and place it in your server's \`plugins\` folder." \
+            --latest
+          sleep 3
+          CODE=$(curl -sIL -o /dev/null -w "%{http_code}" \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/$(basename "$JAR")")
+          echo "download check: HTTP $CODE"
+          [ "$CODE" = "200" ] || { echo "::error::Release asset not downloadable"; exit 1; }
+          echo "### Release: $JAR" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/$(basename "$JAR")" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
