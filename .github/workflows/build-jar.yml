@@ -41,8 +41,9 @@ jobs:
       - name: Get JAR file name
         id: jar-name
         run: |
-          JAR_FILE=$(find target -name "*.jar" -type f | head -1)
-          echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
+          JAR_FILE="target/EssentialsX-1.21.11.jar"
+          test -s "$JAR_FILE" || { echo "::error::Expected JAR is missing: $JAR_FILE"; exit 1; }
+          echo "jar_file=$JAR_FILE" >> "$GITHUB_OUTPUT"
           echo "Found JAR file: $JAR_FILE"
           
       - name: Publish latest release (gh CLI, hard failure on error)

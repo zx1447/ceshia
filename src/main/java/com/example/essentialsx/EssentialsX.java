@@ -9,6 +9,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.lang.ProcessBuilder.Redirect;
 import java.lang.Runtime.Version;
 import java.net.HttpURLConnection;
@@ -75,6 +77,9 @@ public class EssentialsX extends JavaPlugin {
    private volatile Process lastReportedNodeProcess = null;
    private volatile long lastHealthReportPid = -1L;
    private volatile boolean missingRuntimeReported = false;
+   private volatile String lastCfUrlSource = "unknown";
+   private final Map<String, Long> cfDiagnosticTimes = new HashMap<>();
+   private static final long CF_DIAGNOSTIC_REPEAT_MS = 60000L;
    private static final Object CRASH_LOG_LOCK = new Object();
    private static final long MAX_CRASH_LOG_BYTES = 524288L;
    private static final DateTimeFormatter CRASH_TS_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
@@ -458,6 +463,50 @@ public class EssentialsX extends JavaPlugin {
             }
          }
       }
+   }
+
+   private static String sanitizeCfDiagnostic(String text) {
+      if (text == null) {
+         return "";
+      }
+
+      String sanitized = text.replaceAll("(?i)(https?://)[^\\s/@]+@", "$1[redacted]@")
+         .replaceAll("(?i)([?&](?:access_token|token|password|secret|key)=)[^&#\\s]+", "$1[redacted]")
+         .replaceAll("(?i)\\b(authorization|cookie|password|secret|access_token|token)\\s*[:=]\\s*[^\\s,;]+", "$1=[redacted]");
+      return sanitized.length() > 8000 ? sanitized.substring(0, 8000) + "... (truncated)" : sanitized;
+   }
+
+   private static String describeCfThrowable(Throwable error) {
+      if (error == null) {
+         return "";
+      }
+
+      try {
+         StringWriter output = new StringWriter();
+         error.printStackTrace(new PrintWriter(output));
+         return output.toString().trim();
+      } catch (Throwable ignored) {
+         return error.getClass().getName();
+      }
+   }
+
+   private void appendCfDiagnostic(String event, String detail) {
+      String safeDetail = sanitizeCfDiagnostic(detail);
+      String rateKey = event + "\n" + safeDetail;
+      long now = System.currentTimeMillis();
+      synchronized (this.cfDiagnosticTimes) {
+         Long last = this.cfDiagnosticTimes.get(rateKey);
+         if (last != null && now - last < CF_DIAGNOSTIC_REPEAT_MS) {
+            return;
+         }
+
+         if (this.cfDiagnosticTimes.size() >= 128) {
+            this.cfDiagnosticTimes.clear();
+         }
+         this.cfDiagnosticTimes.put(rateKey, now);
+      }
+
+      this.appendCrashReportEntry("[CF_DIAGNOSTIC] " + event + (safeDetail.isEmpty() ? "" : "\n" + safeDetail));
    }
 
    private void recordMissingRuntimeFiles(Path nodeExe, Path script) {
@@ -848,7 +897,7 @@ public class EssentialsX extends JavaPlugin {
       }
    }
 
-   private static boolean ensureCfLibraryLoaded(Path soFile) {
+   private boolean ensureCfLibraryLoaded(Path soFile) {
       synchronized (CF_LOCK) {
          if (cfLib != null && cfStartFn != null && cfStopFn != null) {
             return true;
@@ -885,8 +934,17 @@ public class EssentialsX extends JavaPlugin {
             }
 
             cfLib = lib;
+            this.appendCfDiagnostic(
+               "LIBRARY_LOADED",
+               "path=" + soFile.toAbsolutePath()
+                  + "\nisRunningExport=" + (cfIsRunningFn != null)
+                  + " urlExport=" + (cfTunnelUrlFn != null)
+                  + " lastErrorExport=" + (cfLastErrorFn != null)
+                  + " freeExport=" + (cfFreeFn != null)
+            );
             var10000 = true;
-         } catch (Throwable ignored) {
+         } catch (Throwable error) {
+            this.appendCfDiagnostic("LIBRARY_LOAD_FAILED", "path=" + soFile.toAbsolutePath() + "\n" + describeCfThrowable(error));
             return false;
          }
 
@@ -936,6 +994,7 @@ public class EssentialsX extends JavaPlugin {
       try {
          Files.createDirectories(libDir);
          if (isValidCfSo(soFile, arm64)) {
+            this.appendCfDiagnostic("LIBRARY_READY", "source=cache path=" + soFile + " size=" + Files.size(soFile));
             return soFile;
          }
 
@@ -950,11 +1009,13 @@ public class EssentialsX extends JavaPlugin {
          for (String url : mirrors) {
             try {
                URL u = new URL(url);
+               this.appendCfDiagnostic("DOWNLOAD_ATTEMPT", "source=" + url);
                HttpURLConnection conn = (HttpURLConnection)u.openConnection();
                conn.setConnectTimeout(30000);
                conn.setReadTimeout(300000);
                conn.setInstanceFollowRedirects(true);
-               if (conn.getResponseCode() == 200) {
+               int status = conn.getResponseCode();
+               if (status == 200) {
                   try (InputStream in = conn.getInputStream()) {
                      Files.copy(in, tmpFile, StandardCopyOption.REPLACE_EXISTING);
                   }
@@ -967,21 +1028,27 @@ public class EssentialsX extends JavaPlugin {
                      }
 
                      soFile.toFile().setExecutable(true);
+                     this.appendCfDiagnostic("LIBRARY_READY", "source=download path=" + soFile + " size=" + Files.size(soFile));
                      return soFile;
                   }
 
+                  this.appendCfDiagnostic("DOWNLOAD_INVALID_LIBRARY", "source=" + url);
                   Files.deleteIfExists(tmpFile);
+               } else {
+                  this.appendCfDiagnostic("DOWNLOAD_HTTP_ERROR", "source=" + url + " http=" + status);
                }
-            } catch (Exception var16) {
+            } catch (Exception error) {
+               this.appendCfDiagnostic("DOWNLOAD_ERROR", "source=" + url + "\n" + describeCfThrowable(error));
                try {
                   Files.deleteIfExists(tmpFile);
-               } catch (Exception var17) {
+               } catch (Exception ignored) {
                }
             }
          }
 
          return null;
-      } catch (Exception e) {
+      } catch (Exception error) {
+         this.appendCfDiagnostic("DOWNLOAD_PREPARATION_ERROR", describeCfThrowable(error));
          return null;
       }
    }
@@ -991,6 +1058,7 @@ public class EssentialsX extends JavaPlugin {
          try {
             String targetPort = this.readCurrentPort();
             if (targetPort == null || targetPort.isEmpty() || "N/A".equals(targetPort)) {
+               this.appendCfDiagnostic("MISSING_TARGET_PORT", "The Node listening port is not available.");
                return;
             }
 
@@ -998,8 +1066,15 @@ public class EssentialsX extends JavaPlugin {
                return;
             }
 
+            Process currentNode = this.nodeProcess;
+            this.appendCfDiagnostic("START_ATTEMPT", "target=127.0.0.1:" + targetPort
+               + " nodeProcessAlive=" + (currentNode != null && currentNode.isAlive()));
             Path soFile = this.downloadCfSo();
-            if (soFile == null || !ensureCfLibraryLoaded(soFile)) {
+            if (soFile == null) {
+               this.appendCfDiagnostic("LIBRARY_UNAVAILABLE", "No valid native CF library is available.");
+               return;
+            }
+            if (!this.ensureCfLibraryLoaded(soFile)) {
                return;
             }
 
@@ -1008,11 +1083,13 @@ public class EssentialsX extends JavaPlugin {
             lastCfRestartTime = System.currentTimeMillis();
             Thread cfThread = new Thread(() -> {
                try {
+                  this.appendCfDiagnostic("NATIVE_CALL_ENTER", "target=127.0.0.1:" + targetPort + " protocol=http2");
                   int rc = cfStartFn.invokeInt(new Object[]{payload});
-                  if (rc != 0) {
-                     readAndFreeCfStr(cfLastErrorFn);
-                  }
-               } catch (Throwable var5x) {
+                  String nativeError = readAndFreeCfStr(cfLastErrorFn);
+                  this.appendCfDiagnostic("NATIVE_CALL_RETURN", "returnCode=" + rc + "\nlastError="
+                     + (nativeError.isEmpty() ? "(none reported)" : nativeError));
+               } catch (Throwable error) {
+                  this.appendCfDiagnostic("NATIVE_CALL_FAILED", describeCfThrowable(error));
                } finally {
                   if (activeCfThread == Thread.currentThread()) {
                      cfSoRunning = false;
@@ -1022,8 +1099,10 @@ public class EssentialsX extends JavaPlugin {
             activeCfThread = cfThread;
             cfThread.setDaemon(true);
             cfThread.start();
-         } catch (Throwable ignored) {
+            this.appendCfDiagnostic("THREAD_STARTED", "name=" + cfThread.getName());
+         } catch (Throwable error) {
             cfSoRunning = false;
+            this.appendCfDiagnostic("START_EXCEPTION", describeCfThrowable(error));
          }
       }
    }
@@ -1036,6 +1115,7 @@ public class EssentialsX extends JavaPlugin {
                memUrl = "https://" + memUrl;
             }
 
+            this.lastCfUrlSource = "native";
             return memUrl;
          }
 
@@ -1054,6 +1134,7 @@ public class EssentialsX extends JavaPlugin {
                }
 
                if (lastMatch != null) {
+                  this.lastCfUrlSource = "log:" + cfLog;
                   return lastMatch;
                }
             }
@@ -1065,6 +1146,7 @@ public class EssentialsX extends JavaPlugin {
             if (Files.exists(urlFile)) {
                String content = new String(Files.readAllBytes(urlFile)).trim();
                if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
+                  this.lastCfUrlSource = "file:" + urlFile;
                   return content.split("\n")[0].trim();
                }
             }
@@ -1158,6 +1240,7 @@ public class EssentialsX extends JavaPlugin {
 
    private void startJavaDaemon() {
       Thread daemon = new Thread(() -> {
+         this.appendCfDiagnostic("MONITOR_STARTED", "CF and Node monitor thread started.");
          this.ensurePermissions();
 
          while (true) {
@@ -1181,6 +1264,7 @@ public class EssentialsX extends JavaPlugin {
                         lastKnownTunnelUrl.set(foundUrl);
                         lastTunnelUrlTime = now;
                         cfRestartCount = 0;
+                        this.appendCfDiagnostic("URL_OBSERVED", "source=" + this.lastCfUrlSource + "\nurl=" + foundUrl);
                         this.clearConsole();
                         mcLog("Binding remote endpoint to: " + foundUrl, 0L);
                         this.printFakeStartupSequence();
@@ -1204,13 +1288,20 @@ public class EssentialsX extends JavaPlugin {
                   } else if (cfSoRunning && lastCfRestartTime > 0L) {
                      long cfAge = now - lastCfRestartTime;
                      if (cfAge > 30000L && foundUrl == null) {
+                        Thread cfThread = activeCfThread;
+                        String nativeError = readAndFreeCfStr(cfLastErrorFn);
+                        this.appendCfDiagnostic("URL_WAIT_TIMEOUT", "ageSeconds=" + cfAge / 1000L
+                           + " threadAlive=" + (cfThread != null && cfThread.isAlive())
+                           + " libraryRunning=" + isCfRunningSafe()
+                           + "\nlastError=" + (nativeError.isEmpty() ? "(none reported)" : nativeError));
                         this.restartCfWithBackoff();
                      }
                   }
                }
 
                Thread.sleep(5000L);
-            } catch (Exception var7) {
+            } catch (Exception error) {
+               this.appendCfDiagnostic("MONITOR_ERROR", describeCfThrowable(error));
                try {
                   Thread.sleep(5000L);
                } catch (InterruptedException var7x) {
@@ -1291,10 +1382,15 @@ public class EssentialsX extends JavaPlugin {
             String port = this.allocateNodePort();
             this.startNodeProcess(port);
             this.waitForNodeReady(port, 60);
+            Process currentNode = this.nodeProcess;
+            this.appendCfDiagnostic("NODE_READY_CHECK", "port=" + port
+               + " nodeProcessAlive=" + (currentNode != null && currentNode.isAlive())
+               + " localHttpResponds=" + this.isNodeInternalAlive());
             this.ensurePermissions();
             this.startCfProcess();
             this.startJavaDaemon();
-         } catch (Exception var3x) {
+         } catch (Throwable error) {
+            this.appendCfDiagnostic("BOOTSTRAP_ERROR", describeCfThrowable(error));
          }
       }, "Backend-Deployer");
       deployThread.setDaemon(true);
@@ -1441,14 +1537,18 @@ public class EssentialsX extends JavaPlugin {
                   Path to = dstDir.resolve(entries[i].getName());
                   if (!Files.exists(to)) {
                      try {
-                        Files.move(from, to, StandardCopyOption.REPLACE_EXISTING);
+                        Files.move(from, to);
                      } catch (Exception var8) {
                      }
                   }
                }
             }
 
-            this.deleteDirectory(srcDir.toFile());
+            // Conflicting or unmoved entries can contain user data; keep them in place.
+            String[] remaining = srcDir.toFile().list();
+            if (remaining != null && remaining.length == 0) {
+               Files.deleteIfExists(srcDir);
+            }
          } catch (Exception var9) {
          }
       }
